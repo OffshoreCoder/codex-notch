@@ -102,6 +102,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dashboard: DashboardController!
     private var health: HealthController!
     private var previewDirectory: URL?
+    private var codexNames: [String: String] = [:]
+    private let nameReader = ThreadNames()
+    private var lastNameRead = Date.distantPast
+    private var lastNameIDs: [String] = []
+    private var nameReadInFlight = false
+    private var nameReport: ThreadNames.Result?
     private var timer: Timer?
     private var demo = option("--demo").flatMap(CompanionState.init(rawValue:))
     private let spool = EventSpool(directory: EventSpool.defaultDirectory)
@@ -119,14 +125,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller = NotchController()
         dashboard = DashboardController(handler: { [weak self] action in self?.handle(action) })
         health = HealthController(reportProvider: { [weak self] selfTest in
-            let report = IntegrationHealth.check(hooksURL: FileManager.default.homeDirectoryForCurrentUser
+            let baseReport = IntegrationHealth.check(hooksURL: FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".codex/hooks.json"),
                 executableURL: URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL,
                 spoolDirectory: EventSpool.defaultDirectory, runSelfTest: selfTest)
             let last = self?.library.data.lastRealEvent
             let text = last.map { "Последнее реальное событие: " + Self.duration(Date().timeIntervalSince($0)) + " назад" }
                 ?? "Реальных событий ещё не получено. Это не доказывает сбой подключения."
-            return (report, text)
+            let names = self?.nameReport
+            let nameCheck = IntegrationHealth.Check(id: "thread-names", title: "Названия чатов",
+                detail: names?.detail ?? "Проверка источника названий ещё выполняется.",
+                status: names?.status == .available ? .ok : .warning)
+            return (IntegrationHealth.Report(checks: baseReport.checks + [nameCheck]), text)
         })
         controller.healthHandler = { [weak self] in self?.health.show() }
         controller.dashboardHandler = { [weak self] in
@@ -230,7 +240,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } ?? attentionSnapshot ?? live
         controller.update(snapshot)
         controller.updateQueue(library.data.completions, error: library.error,
-            pendingCount: Set(library.data.completions.map(\.id) + Array(library.data.attention.keys)).count)
+            pendingCount: Set(library.data.completions.map(\.id) + Array(library.data.attention.keys)).count,
+            chatNames: library.data.labels.merging(codexNames) { manual, _ in manual })
         updateDashboard()
     }
 
@@ -239,7 +250,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .openChat(let id):
             if controller.openChat(id) { library.acknowledgeChat(id) }
         case .acknowledgeChat(let id): library.acknowledgeChat(id)
-        case .rename(let id, let name): library.rename(id, to: name)
+        case .rename(let id, let name): library.rename(id, to: name == codexNames[id.lowercased()] ? "" : name)
         case .important(let id): library.selectImportant(id)
         case .quiet(let seconds): library.beginQuiet(seconds: seconds)
         case .endQuiet: finishQuiet()
@@ -276,11 +287,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             all[result.sessionID] = ChatSummary(id: result.sessionID, turnID: result.turnID,
                 state: .finished, startedAt: result.startedAt, updatedAt: result.finishedAt)
         }
-        let entries = all.values.sorted { left, right in
+        let ordered = all.values.sorted { left, right in
             let l = library.data.completions.contains { $0.sessionID == left.id }
             let r = library.data.completions.contains { $0.sessionID == right.id }
             return l != r ? l : left.updatedAt > right.updatedAt
-        }.map { saved -> DashboardEntry in
+        }
+        refreshNames(sessionIDs: ordered.map(\.id))
+        let entries = ordered.map { saved -> DashboardEntry in
             let chat = live[saved.id] ?? saved
             let state = live[saved.id] == nil && [.working, .coding, .checking].contains(saved.state)
                 ? CompanionState.unknown : chat.state
@@ -290,7 +303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let elapsed = duration.map { "Ход: " + Self.duration($0) } ?? ""
             let request = library.data.attention.values.first { $0.sessionID == chat.id }
             let deferred = library.data.deferredReminders.filter { $0.sessionID == chat.id }
-            var entry = DashboardEntry(id: chat.id, name: library.name(for: chat.id),
+            var entry = DashboardEntry(id: chat.id, name: displayName(for: chat.id),
                 stateText: request?.state.companionTitle ?? (state == .finished ? "Ход завершён" : state.companionTitle),
                 elapsedText: state == .unknown ? "Последнее известное состояние" : elapsed,
                 updatedText: "Последний сигнал: " + Self.duration(Date().timeIntervalSince(chat.updatedAt)) + " назад",
@@ -312,6 +325,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return entry
         }
         dashboard.update(entries: entries)
+    }
+
+    private func displayName(for sessionID: String) -> String {
+        library.data.labels[sessionID] ?? codexNames[sessionID.lowercased()] ?? "Чат без названия"
+    }
+
+    private func refreshNames(sessionIDs: [String]) {
+        guard option("--preview") == nil, !nameReadInFlight else { return }
+        let ids = Array(sessionIDs.prefix(512))
+        let membership = ids.sorted()
+        guard membership != lastNameIDs || Date().timeIntervalSince(lastNameRead) >= 5 else { return }
+        lastNameIDs = membership
+        lastNameRead = Date()
+        nameReadInFlight = true
+        let reader = nameReader
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let result = reader.read(sessionIDs: ids)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if result.status == .available { self.codexNames = result.names }
+                else { self.codexNames = self.codexNames.filter { ids.contains($0.key) } }
+                self.nameReport = result
+                self.nameReadInFlight = false
+                self.updateDashboard()
+            }
+        }
     }
 
     private static let attentionInstruction = """

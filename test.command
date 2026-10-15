@@ -16,3 +16,6 @@ xcrun swiftc "${compiler_args[@]}" Sources/CompanionState.swift Sources/EventSpo
 
 xcrun swiftc "${compiler_args[@]}" Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Tests/AttentionTests.swift -o .build/attention-tests
 ./.build/attention-tests
+
+xcrun swiftc "${compiler_args[@]}" -lsqlite3 Sources/ThreadNames.swift Tests/ThreadNamesTests.swift -o .build/name-tests
+./.build/name-tests

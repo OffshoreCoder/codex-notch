@@ -11,6 +11,7 @@ final class NotchController: NSObject, NSMenuDelegate {
     var acknowledgeHandler: ((String?) -> Void)?
     private var completions: [CompletedTurn] = []
     private var queueError: String?
+    private var chatNames: [String: String] = [:]
     private var quiet = false
     private var noticeSessionID: String?
 
@@ -118,8 +119,9 @@ final class NotchController: NSObject, NSMenuDelegate {
         updateStatusItemDescription()
     }
 
-    func updateQueue(_ completions: [CompletedTurn], error: String?, pendingCount: Int? = nil) {
+    func updateQueue(_ completions: [CompletedTurn], error: String?, pendingCount: Int? = nil, chatNames: [String: String] = [:]) {
         self.completions = completions
+        self.chatNames = chatNames
         queueError = error
         let count = pendingCount ?? completions.count
         companionView.unreadCount = count
@@ -348,7 +350,7 @@ final class NotchController: NSObject, NSMenuDelegate {
         if !completions.isEmpty {
             let results = NSMenu()
             for result in completions.reversed().prefix(30) {
-                let row = item("Ход завершён · " + String(result.sessionID.prefix(8)), action: #selector(openResult(_:)))
+                let row = item("Ход завершён · " + (chatNames[result.sessionID] ?? chatNames[result.sessionID.lowercased()] ?? "Чат без названия"), action: #selector(openResult(_:)))
                 row.representedObject = result.id
                 results.addItem(row)
             }

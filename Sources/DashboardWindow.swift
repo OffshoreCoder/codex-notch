@@ -394,7 +394,7 @@ final class DashboardController: NSObject, NSMenuDelegate {
         let alert = NSAlert()
         alert.window.appearance = NSAppearance(named: .darkAqua)
         alert.messageText = "Название чата на этом Mac"
-        alert.informativeText = "Локальная подпись поможет узнать задачу. Название в Codex не изменится."
+        alert.informativeText = "Локальная подпись заменит имя только в пульте. Оставь поле пустым, чтобы использовать имя из Codex."
         alert.addButton(withTitle: "Сохранить")
         alert.addButton(withTitle: "Отмена")
         let input = NSTextField(string: entry.name)
