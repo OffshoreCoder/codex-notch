@@ -38,7 +38,9 @@ final class NotchController: NSObject, NSMenuDelegate {
     private var timer: Timer?
     private var renderSchedule = CompanionRenderSchedule.resolve(visible: false, displaySleeping: false,
         animated: false, reducedMotion: false, lowPower: false)
-    private var displaySleeping = false
+    private var screenSleeping = false
+    private var systemSleeping = false
+    private var displaySleeping: Bool { screenSleeping || systemSleeping }
     private var powerObserver: NSObjectProtocol?
     private var sleepObservers: [NSObjectProtocol] = []
     private var screenObserver: NSObjectProtocol?
@@ -75,7 +77,7 @@ final class NotchController: NSObject, NSMenuDelegate {
             guard let self else { return }
             self.dashboardHandler?()
         }
-        companionView.onPointerChanged = { [weak self] in self?.tick() }
+        companionView.onPointerChanged = { [weak self] in self?.tick(animate: false) }
         companionView.contextMenu = menu
         companionView.reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         headphoneAccessory.onChange = { [weak self] wearing in
@@ -119,12 +121,18 @@ final class NotchController: NSObject, NSMenuDelegate {
         let workspace = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.screensDidSleepNotification, NSWorkspace.willSleepNotification] {
             sleepObservers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.setDisplaySleeping(true) }
+                MainActor.assumeIsolated {
+                    if name == NSWorkspace.willSleepNotification { self?.setSystemSleeping(true) }
+                    else { self?.setDisplaySleeping(true) }
+                }
             })
         }
         for name in [NSWorkspace.screensDidWakeNotification, NSWorkspace.didWakeNotification] {
             sleepObservers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.setDisplaySleeping(false) }
+                MainActor.assumeIsolated {
+                    if name == NSWorkspace.didWakeNotification { self?.setSystemSleeping(false) }
+                    else { self?.setDisplaySleeping(false) }
+                }
             })
         }
         positionPanel()
@@ -216,9 +224,11 @@ final class NotchController: NSObject, NSMenuDelegate {
     }
 
     func setQuiet(_ active: Bool) {
+        let hadNotice = companionView.notice != nil
         quiet = active
         if active { attentionUntil = .distantPast; companionView.notice = nil; noticeSessionID = nil; noticeTitle = nil }
         refreshExpansion()
+        if active, hadNotice, panel.isVisible, !displaySleeping { companionView.needsDisplay = true }
     }
 
     func notify(title: String, sessionID: String? = nil, duration: TimeInterval = 8) {
@@ -228,6 +238,7 @@ final class NotchController: NSObject, NSMenuDelegate {
         companionView.notice = privacyPresentation.notice(title, isSharing: screenSharing)
         attentionUntil = Date().addingTimeInterval(duration)
         refreshExpansion()
+        if panel.isVisible, !displaySleeping { companionView.needsDisplay = true }
     }
 
     func show() {
@@ -326,7 +337,7 @@ final class NotchController: NSObject, NSMenuDelegate {
         if menuNeedsUpdate { rebuildMenu() }
     }
 
-    private func tick() {
+    private func tick(animate: Bool = true) {
         guard isVisible, panel.isVisible, !displaySleeping else { return }
         let localPointer = companionView.convert(panel.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
         let hovered = panel.isVisible && companionView.containsCapsule(localPointer)
@@ -346,7 +357,7 @@ final class NotchController: NSObject, NSMenuDelegate {
             hoverStarted = nil
         }
         refreshExpansion(now: now)
-        guard renderSchedule.drawsAnimation else { return }
+        guard animate, renderSchedule.drawsAnimation else { return }
         companionView.animationTime = now.timeIntervalSince(animationStarted)
         companionView.needsDisplay = true
     }
@@ -354,10 +365,17 @@ final class NotchController: NSObject, NSMenuDelegate {
     /// macOS sends these notifications even when the app has no open dashboard.
     /// Sleeping displays never need pointer checks or animation frames.
     func setDisplaySleeping(_ sleeping: Bool) {
-        guard displaySleeping != sleeping else { return }
-        displaySleeping = sleeping
+        guard screenSleeping != sleeping else { return }
+        screenSleeping = sleeping
         refreshRenderSchedule()
-        if !sleeping { refreshExpansion(); companionView.needsDisplay = true }
+        if !displaySleeping { refreshExpansion(); companionView.needsDisplay = true }
+    }
+
+    private func setSystemSleeping(_ sleeping: Bool) {
+        guard systemSleeping != sleeping else { return }
+        systemSleeping = sleeping
+        refreshRenderSchedule()
+        if !displaySleeping { refreshExpansion(); companionView.needsDisplay = true }
     }
 
     private func refreshRenderSchedule() {
@@ -380,7 +398,11 @@ final class NotchController: NSObject, NSMenuDelegate {
     }
 
     private func refreshExpansion(now: Date = Date()) {
-        if now >= attentionUntil { companionView.notice = nil; noticeSessionID = nil; noticeTitle = nil }
+        if now >= attentionUntil {
+            let hadNotice = companionView.notice != nil
+            companionView.notice = nil; noticeSessionID = nil; noticeTitle = nil
+            if hadNotice, panel.isVisible, !displaySleeping { companionView.needsDisplay = true }
+        }
         setExpanded(now < attentionUntil || now < expandedUntil || now < hoverUntil)
     }
 
