@@ -248,7 +248,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func handle(_ action: DashboardAction) {
         switch action {
         case .openChat(let id):
-            if controller.openChat(id) { library.acknowledgeChat(id) }
+            if controller.openChat(id) {
+                library.acknowledgeChat(id)
+                dashboard.hide()
+            }
         case .acknowledgeChat(let id): library.acknowledgeChat(id)
         case .rename(let id, let name): library.rename(id, to: name == codexNames[id.lowercased()] ? "" : name)
         case .important(let id): library.selectImportant(id)

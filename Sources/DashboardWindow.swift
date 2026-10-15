@@ -526,20 +526,13 @@ private final class DashboardRow: NSView, NSMenuDelegate {
         importantItem.target = self
         importantItem.action = #selector(toggleImportant)
         more.menu?.addItem(importantItem)
-        let open = NSButton(title: "Открыть", target: self, action: #selector(openChat))
+        let open = DashboardOpenButton(title: "Открыть", target: self, action: #selector(openChat))
+        open.font = .systemFont(ofSize: 11, weight: .semibold)
         acknowledge.target = self
         acknowledge.action = #selector(acknowledgeChat)
-        [open, acknowledge].forEach {
-            $0.bezelStyle = .rounded
-            $0.controlSize = .small
-            $0.font = .systemFont(ofSize: 11, weight: .medium)
-        }
-        open.bezelColor = NSColor(hex: 0x335E9B)
-        open.contentTintColor = DashboardPalette.text
-        open.attributedTitle = NSAttributedString(string: "Открыть", attributes: [
-            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
-            .foregroundColor: DashboardPalette.blue
-        ])
+        acknowledge.bezelStyle = .rounded
+        acknowledge.controlSize = .small
+        acknowledge.font = .systemFont(ofSize: 11, weight: .medium)
         reminder.controlSize = .small
         reminder.font = .systemFont(ofSize: 11)
         reminder.addItem(withTitle: "Напомнить")
@@ -627,6 +620,65 @@ private final class DashboardRow: NSView, NSMenuDelegate {
     @objc private func remindCompleted(_ sender: NSMenuItem) { handler(.remindCompleted(entry.id, TimeInterval(sender.tag))) }
     @objc private func watchDuration(_ sender: NSMenuItem) { handler(.watchDuration(entry.id, TimeInterval(sender.tag))) }
     @objc private func cancelReminders() { handler(.cancelReminders(entry.id)) }
+}
+
+/// Native button tracking/action/keyboard behavior with an explicit per-button appearance.
+/// Drawing is independent of the panel becoming inactive after opening Codex.
+@MainActor
+private final class DashboardOpenButton: NSButton {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        setButtonType(.momentaryPushIn)
+        state = .off
+        isBordered = false
+        font = .systemFont(ofSize: 11, weight: .semibold)
+        focusRingType = .exterior
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override var allowsVibrancy: Bool { false }
+    override var acceptsFirstResponder: Bool { isEnabled }
+    override var intrinsicContentSize: NSSize {
+        let attributes: [NSAttributedString.Key: Any] = [.font: font ?? NSFont.systemFont(ofSize: 11, weight: .semibold)]
+        return NSSize(width: ceil((title as NSString).size(withAttributes: attributes).width) + 24, height: 26)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let pressed = cell?.isHighlighted == true
+        let fill = !isEnabled ? NSColor(hex: 0x354050)
+            : pressed ? NSColor(srgbRed: 32.0 / 255, green: 83.0 / 255, blue: 159.0 / 255, alpha: 1)
+                : NSColor(srgbRed: 40.0 / 255, green: 100.0 / 255, blue: 190.0 / 255, alpha: 1)
+        fill.setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6).fill()
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font ?? NSFont.systemFont(ofSize: 11, weight: .semibold),
+            .foregroundColor: isEnabled ? NSColor.white : DashboardPalette.secondary
+        ]
+        let size = (title as NSString).size(withAttributes: attributes)
+        let rect = NSRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2,
+                          width: size.width, height: size.height)
+        (title as NSString).draw(in: rect, withAttributes: attributes)
+    }
+
+    override func highlight(_ flag: Bool) {
+        super.highlight(flag)
+        needsDisplay = true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        defer { state = .off; highlight(false) }
+        super.mouseDown(with: event)
+    }
+
+    override func performClick(_ sender: Any?) {
+        defer { state = .off; highlight(false) }
+        super.performClick(sender)
+    }
+
+    override var focusRingMaskBounds: NSRect { bounds.insetBy(dx: 0.5, dy: 0.5) }
+    override func drawFocusRingMask() {
+        NSBezierPath(roundedRect: focusRingMaskBounds, xRadius: 6, yRadius: 6).fill()
+    }
 }
 
 private final class DashboardStateChip: NSView {
