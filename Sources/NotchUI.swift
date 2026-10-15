@@ -9,12 +9,17 @@ final class NotchController: NSObject, NSMenuDelegate {
     var dashboardHandler: (() -> Void)?
     var liveHandler: (() -> Void)?
     var acknowledgeHandler: ((String?) -> Void)?
+    var keepAwakeHandler: (() -> Void)?
     var screenSharingHandler: (() -> Void)?
     var skinHandler: ((CharacterSkin) -> Void)?
     private var skin: CharacterSkin = .robot
     private var completions: [CompletedTurn] = []
     private var queueError: String?
     private var chatNames: [String: String] = [:]
+    private var keepAwakeEnabled = false
+    private var keepAwakeStatus = "Обычный режим сна"
+    private var menuTracking = false
+    private var menuNeedsUpdate = false
     private var quiet = false
     private var noticeSessionID: String?
     private var noticeTitle: String?
@@ -172,6 +177,13 @@ final class NotchController: NSObject, NSMenuDelegate {
         companionView.needsDisplay = true
     }
 
+    func setKeepAwake(enabled: Bool, status: String) {
+        guard keepAwakeEnabled != enabled || keepAwakeStatus != status else { return }
+        keepAwakeEnabled = enabled
+        keepAwakeStatus = status
+        rebuildMenu()
+    }
+
     func setQuiet(_ active: Bool) {
         quiet = active
         if active { attentionUntil = .distantPast; companionView.notice = nil; noticeSessionID = nil; noticeTitle = nil }
@@ -275,7 +287,12 @@ final class NotchController: NSObject, NSMenuDelegate {
     }
 
     func menuWillOpen(_ menu: NSMenu) {
-        if menu === self.menu { rebuildMenu() }
+        if menu === self.menu { rebuildMenu(); menuTracking = true }
+    }
+    func menuDidClose(_ menu: NSMenu) {
+        guard menu === self.menu else { return }
+        menuTracking = false
+        if menuNeedsUpdate { rebuildMenu() }
     }
 
     private func tick() {
@@ -378,6 +395,8 @@ final class NotchController: NSObject, NSMenuDelegate {
     }
 
     private func rebuildMenu() {
+        guard !menuTracking else { menuNeedsUpdate = true; return }
+        menuNeedsUpdate = false
         menu.removeAllItems()
         let state = NSMenuItem(title: "Codex · \(snapshot.state.companionTitle)", action: nil, keyEquivalent: "")
         state.isEnabled = false
@@ -405,6 +424,15 @@ final class NotchController: NSObject, NSMenuDelegate {
             let queue = NSMenuItem(title: "Ожидают просмотра: \(completions.count)", action: nil, keyEquivalent: "")
             queue.submenu = results
             menu.addItem(queue)
+        }
+        let awake = item("Не усыплять Mac во время работы", action: #selector(toggleKeepAwake))
+        awake.state = keepAwakeEnabled ? .on : .off
+        awake.toolTip = "Только автоматический сон. Экран может гаснуть; закрытие крышки и ручной Сон остаются по правилам macOS."
+        menu.addItem(awake)
+        if keepAwakeEnabled {
+            let status = NSMenuItem(title: keepAwakeStatus, action: nil, keyEquivalent: "")
+            status.isEnabled = false
+            menu.addItem(status)
         }
         let presentation = item("Режим демонстрации", action: #selector(toggleScreenSharing))
         presentation.state = screenSharing ? .on : .off
@@ -512,6 +540,7 @@ final class NotchController: NSObject, NSMenuDelegate {
 
     @objc private func returnToLive() { liveHandler?() }
 
+    @objc private func toggleKeepAwake() { keepAwakeHandler?() }
     @objc private func toggleScreenSharing() { screenSharingHandler?() }
 
     @objc private func openHealth() { healthHandler?() }

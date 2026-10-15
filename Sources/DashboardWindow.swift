@@ -36,6 +36,7 @@ enum DashboardAction {
     case toggleGroupSelection(String)
     case archive(String)
     case restoreArchive(String)
+    case toggleKeepAwake
     case selectSkin(CharacterSkin)
     case toggleSharing
     case startGroup
@@ -88,6 +89,9 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
     private let attentionCount = NSTextField(labelWithString: "")
     private let completedCount = NSTextField(labelWithString: "")
     private let focusStatus = NSTextField(labelWithString: "Все чаты могут уведомлять")
+    private let keepAwakeButton = NSButton(checkboxWithTitle: "Не усыплять Mac во время работы", target: nil, action: nil)
+    private let keepAwakeStatus = NSTextField(labelWithString: "")
+    private let keepAwakeLimit = NSTextField(wrappingLabelWithString: "Экран может гаснуть. Закрытие крышки всё ещё может усыпить Mac.")
     private let quietButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private var groupControls: NSStackView?
     private let groupStatus = NSTextField(labelWithString: "Выбери ходы в меню ••• у чатов")
@@ -231,11 +235,31 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
         groupControls.spacing = 8
         groupControls.isHidden = true
         self.groupControls = groupControls
-        let top = NSStackView(views: [heading, counts, search, filterControl, focusControls, quietStatus, groupControls])
+        keepAwakeButton.target = self
+        keepAwakeButton.action = #selector(toggleKeepAwake)
+        keepAwakeButton.controlSize = .small
+        keepAwakeButton.font = .systemFont(ofSize: 11, weight: .medium)
+        keepAwakeButton.contentTintColor = DashboardPalette.text
+        keepAwakeButton.toolTip = "Удерживает только автоматический сон, пока есть свежие активные ходы. Экран может гаснуть. Крышка, ручной Сон и низкий заряд по правилам macOS. Для закрытой крышки нужен внешний монитор и питание. На батарее расход увеличится."
+        keepAwakeButton.setAccessibilityLabel("Не усыплять Mac во время работы")
+        configureMetadata(keepAwakeStatus)
+        keepAwakeLimit.font = .systemFont(ofSize: 10)
+        keepAwakeLimit.textColor = DashboardPalette.secondary
+        keepAwakeLimit.maximumNumberOfLines = 2
+        keepAwakeLimit.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        keepAwakeStatus.isHidden = true
+        keepAwakeLimit.isHidden = true
+        let powerControls = NSStackView(views: [keepAwakeButton, keepAwakeStatus, keepAwakeLimit])
+        powerControls.orientation = .vertical
+        powerControls.alignment = .leading
+        powerControls.spacing = 4
+        keepAwakeStatus.widthAnchor.constraint(equalTo: powerControls.widthAnchor).isActive = true
+        keepAwakeLimit.widthAnchor.constraint(equalTo: powerControls.widthAnchor).isActive = true
+        let top = NSStackView(views: [heading, counts, search, filterControl, focusControls, quietStatus, groupControls, powerControls])
         top.orientation = .vertical
         top.alignment = .leading
         top.spacing = 8
-        [heading, counts, search, filterControl, focusControls, quietStatus, groupControls].forEach {
+        [heading, counts, search, filterControl, focusControls, quietStatus, groupControls, powerControls].forEach {
             $0.widthAnchor.constraint(equalTo: top.widthAnchor).isActive = true
         }
         let divider = NSBox()
@@ -307,6 +331,16 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
         if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
         if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
     }
+
+    func updateKeepAwake(enabled: Bool, status: String, active: Bool, failed: Bool, detail: String?) {
+        keepAwakeButton.state = enabled ? .on : .off
+        keepAwakeStatus.stringValue = failed && !enabled ? "Выключено · предупреждение IOKit" : status
+        keepAwakeStatus.toolTip = detail ?? status
+        keepAwakeStatus.textColor = failed ? DashboardPalette.amber : active ? DashboardPalette.green : DashboardPalette.dim
+        keepAwakeStatus.isHidden = !enabled && !failed
+        keepAwakeLimit.isHidden = !enabled
+    }
+    @objc private func toggleKeepAwake() { handler(.toggleKeepAwake) }
 
     func updateSkin(_ skin: CharacterSkin) {
         for item in skinButton.menu?.items ?? [] {

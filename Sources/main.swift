@@ -80,7 +80,7 @@ if arguments.contains("--help") {
     CodexNotch — локальный персонаж у выреза Mac.
       --attention KIND --session UUID --turn ID  явный question/review/clear
       --preview-dashboard    вместе с --preview отрисовать демонстрацию пульта
-      --preview-scene NAME   panel/result/sharing/group, только выдуманные данные
+      --preview-scene NAME   panel/result/sharing/group/awake, только выдуманные данные
       --preview-scale N      масштаб compact-preview, от 1 до 16
       --health [--self-test] проверить настройки/путь и локальную запись без AppKit
       --demo STATE           idle/working/coding/checking/finished/interrupted/unknown
@@ -102,6 +102,9 @@ if arguments.contains("--help") {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: NotchController!
     private var model = CompanionModel()
+    private let keepAwake = KeepAwakeController()
+    private var keepAwakeQuestions = KeepAwakeQuestions()
+    private var powerEventsAfter = Date.distantPast
     private var library: LocalStore!
     private var dashboard: DashboardController!
     private var dashboardShortcut: GlobalShortcutController?
@@ -153,7 +156,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let nameCheck = IntegrationHealth.Check(id: "thread-names", title: "Названия чатов",
                 detail: names?.detail ?? "Проверка источника названий ещё выполняется.",
                 status: names?.status == .available ? .ok : .warning)
-            return (IntegrationHealth.Report(checks: baseReport.checks + [nameCheck]), text)
+            let power = self?.keepAwake
+            let powerCheck = IntegrationHealth.Check(id: "keep-awake", title: "Режим сна",
+                detail: (power?.statusText ?? "Обычный режим сна") + (power?.lastError.map { " · " + $0 } ?? ""),
+                status: power?.status == .failed || power?.lastError != nil ? .warning : .ok)
+            return (IntegrationHealth.Report(checks: baseReport.checks + [nameCheck, powerCheck]), text)
         })
         controller.healthHandler = { [weak self] in
             guard let self else { return }
@@ -164,6 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 alert.runModal()
             } else { self.health.show() }
         }
+        controller.keepAwakeHandler = { [weak self] in self?.handle(.toggleKeepAwake) }
         controller.skinHandler = { [weak self] skin in self?.handle(.selectSkin(skin)) }
         controller.screenSharingHandler = { [weak self] in self?.handle(.toggleSharing) }
         controller.dashboardHandler = { [weak self] in
@@ -190,6 +198,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.demoHandler = { [weak self] state in self?.demo = state; self?.refresh() }
         controller.liveHandler = { [weak self] in self?.demo = nil; self?.refresh() }
         if option("--preview") == nil {
+            wakeObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.powerEventsAfter = Date()
+                    self?.keepAwake.stop()
+                }
+            })
             wakeObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.sessionActive = false }
             })
@@ -198,6 +212,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     MainActor.assumeIsolated {
                         self?.resumed = true
                         if name == NSWorkspace.sessionDidBecomeActiveNotification { self?.sessionActive = true }
+                        if name == NSWorkspace.didWakeNotification {
+                            self?.powerEventsAfter = Date()
+                            self?.keepAwake.stop()
+                        }
                     }
                 })
             }
@@ -206,6 +224,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         timer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refresh() }
         }
+        // Keep lifecycle processing and the bounded power lease alive while menus track.
+        if let timer { RunLoop.main.add(timer, forMode: .common) }
         if let path = option("--preview") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                 if arguments.contains("--preview-dashboard") {
@@ -232,6 +252,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        keepAwake.stop()
         if let previewDirectory { try? FileManager.default.removeItem(at: previewDirectory) }
     }
 
@@ -252,7 +273,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 model.receive(event)
                 let current = model.chatSummaries().first { $0.id == event.sessionID } ?? library.data.chats[event.sessionID]
                 library.receiveResult(event, current: current)
-                if library.receiveAttention(event, current: current, deferNotification: library.quietExpired()),
+                let attentionAccepted = library.receiveAttention(event, current: current, deferNotification: library.quietExpired())
+                if attentionAccepted,
                    library.shouldNotify(event.sessionID, now: event.timestamp) {
                     explicitNotices.append(LocalNotice(title: event.event == "AttentionQuestion" ? "Нужен твой ответ" : "Посмотри результат",
                         sessionID: event.sessionID, key: event.sessionID + "|" + (event.turnID ?? "")))
@@ -260,6 +282,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let accepted = event.event == "SessionEnd"
                     ? (previous.map { event.timestamp >= $0.updatedAt } ?? true)
                     : (current?.updatedAt == event.timestamp)
+                keepAwakeQuestions.receive(event, current: current, attentionAccepted: attentionAccepted, lifecycleAccepted: accepted)
                 library.restoreForEvent(event, accepted: accepted)
                 library.receiveGroup(event, accepted: accepted, current: current)
                 if accepted { library.rememberWorkingDirectory(event) }
@@ -312,6 +335,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if sessionActive, library.quietExpired() { finishQuiet() }
         controller.setQuiet(library.isQuiet())
+        let liveChats = model.chatSummaries().filter { $0.updatedAt >= powerEventsAfter }
+        let blocked = keepAwakeQuestions.blockedSessionIDs.union(library.data.attention.values.filter { $0.kind == .question }.map(\.sessionID))
+        keepAwake.update(enabled: library.data.keepAwakeEnabled, isPreview: option("--preview") != nil || demo != nil,
+            liveChats: liveChats, blockedSessionIDs: blocked)
+        let awakeText = keepAwake.status == .waiting && !blocked.isEmpty ? "Ожидается твой ответ · сон разрешён" : keepAwake.statusText
+        controller.setKeepAwake(enabled: library.data.keepAwakeEnabled, status: awakeText)
+        dashboard.updateKeepAwake(enabled: library.data.keepAwakeEnabled, status: awakeText,
+            active: keepAwake.status == .active, failed: keepAwake.status == .failed || keepAwake.lastError != nil, detail: keepAwake.lastError)
         let live = model.snapshot()
         let attention = library.data.attention.values.sorted { $0.requestedAt > $1.requestedAt }.first
         let attentionSnapshot = attention.map {
@@ -339,6 +370,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 library.openChat(id)
                 dashboard.hide()
             }
+        case .toggleKeepAwake: library.update { $0.keepAwakeEnabled.toggle() }
         case .selectSkin(let skin): library.update { $0.characterSkin = skin.rawValue }
         case .toggleSharing:
             library.update { $0.screenSharing.toggle() }
@@ -558,6 +590,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         dashboard.setScreenSharing(sharing)
         dashboard.update(entries: entries)
+        if scene == "awake" {
+            dashboard.updateKeepAwake(enabled: true, status: "Демо: Mac не уснёт от бездействия · чатов: 1", active: true, failed: false, detail: nil)
+        }
         dashboard.updateQuiet(status: scene == "group" ? "Тишина ещё 18 мин" : "Уведомления включены", active: scene == "group")
         dashboard.updateGroup(text: scene == "group" ? "Завершены 2 из 3" : nil, selectedCount: 0, hasGroup: scene == "group")
     }

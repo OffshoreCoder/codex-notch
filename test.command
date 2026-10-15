@@ -49,3 +49,14 @@ xcrun swiftc "${compiler_args[@]}" Sources/PrivacyPresentation.swift Tests/Priva
 
 xcrun swiftc "${compiler_args[@]}" -framework AppKit Sources/ResultSignal.swift Sources/TurnGroup.swift Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Sources/CharacterSkin.swift Tests/CharacterSkinTests.swift -o .build/skin-tests
 ./.build/skin-tests
+
+xcrun swiftc "${compiler_args[@]}" -framework IOKit Sources/ResultSignal.swift Sources/TurnGroup.swift Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Sources/KeepAwake.swift Tests/KeepAwakeTests.swift -o .build/keep-awake-tests
+./.build/keep-awake-tests
+
+xcrun swiftc "${compiler_args[@]}" -framework IOKit Sources/ResultSignal.swift Sources/TurnGroup.swift Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Sources/KeepAwake.swift Tests/KeepAwakeQuestionTests.swift -o .build/keep-awake-question-tests
+./.build/keep-awake-question-tests
+
+if [[ "${CODEX_NOTCH_TEST_NATIVE_POWER:-0}" == "1" ]]; then
+  xcrun swiftc "${compiler_args[@]}" -framework IOKit Sources/ResultSignal.swift Sources/TurnGroup.swift Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Sources/KeepAwake.swift Tests/KeepAwakeNativeTests.swift -o .build/keep-awake-native-tests
+  ./.build/keep-awake-native-tests --run-native-smoke
+fi
