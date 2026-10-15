@@ -46,6 +46,13 @@ struct KeyboardTests {
             let other = GlobalShortcutController(defaults: otherPreferences, action: {})
             try expect(!other.configure(shortcut), "An occupied global combination is reported instead of silently stolen")
             try expect(!other.isEnabled && other.error != nil, "A conflict leaves the other controller disabled")
+            let reserved = GlobalShortcut(keyCode: UInt32(kVK_F18),
+                modifiers: UInt32(cmdKey | controlKey | optionKey | shiftKey), keyLabel: "F18")
+            try expect(other.configure(reserved), "Second controller registers a different deliberate shortcut")
+            try expect(!controller.configure(reserved) && controller.error != nil,
+                       "Failed replacement leaves the current shortcut working with an error")
+            try expect(controller.configure(shortcut) && controller.error == nil,
+                       "Reselecting the working shortcut clears the old error")
             try expect(controller.configure(nil), "Shortcut can be disabled")
             try expect(!controller.isEnabled, "Disable updates state immediately")
         }

@@ -112,7 +112,7 @@ final class GlobalShortcutController {
             return true
         }
         guard value.isValid, eventHandler != nil else { return false }
-        if value == shortcut, hotKey != nil { return true }
+        if value == shortcut, hotKey != nil { error = nil; return true }
         var replacement: EventHotKeyRef?
         let status = RegisterEventHotKey(value.keyCode, value.modifiers,
             EventHotKeyID(signature: signature, id: 1), GetApplicationEventTarget(), 0, &replacement)
