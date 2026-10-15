@@ -7,7 +7,7 @@ if ! xcrun --find swiftc >/dev/null 2>&1; then
 fi
 project_root="$PWD"
 app_path="$project_root/CodexNotch.app"
-mkdir -p "$app_path/Contents/MacOS" "$project_root/.build/module-cache"
+mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources" "$project_root/.build/module-cache"
 xcrun swiftc -O -swift-version 5 \
   -target "$(uname -m)-apple-macosx13.0" \
   -module-cache-path "$project_root/.build/module-cache" \
@@ -22,12 +22,16 @@ cat > "$app_path/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>CodexNotch</string>
   <key>CFBundleDisplayName</key><string>Codex Notch</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>0.2.0</string>
+  <key>CFBundleVersion</key><string>2</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
+xcrun swiftc -O -module-cache-path "$project_root/.build/module-cache" -framework AppKit \
+  "$project_root/Tools/GenerateIcon.swift" -o "$project_root/.build/generate-icon"
+"$project_root/.build/generate-icon" "$app_path/Contents/Resources/AppIcon.icns"
 /usr/bin/codesign --force --sign - --identifier local.codex.notch "$app_path"
 print "Собрано: $app_path"
