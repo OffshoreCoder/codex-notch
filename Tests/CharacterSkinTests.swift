@@ -32,9 +32,35 @@ struct CharacterSkinTests {
                     try expect(first.data != idle.data, "Actionable states remain distinct without animation")
                 }
             }
-            let animatedA = render(skin: skin, state: .working, time: 0.3, reducedMotion: false)
-            let animatedB = render(skin: skin, state: .working, time: 1.4, reducedMotion: false)
-            try expect(animatedA.data != animatedB.data, "Working motion is available when permitted")
+            for state: CompanionState in [.working, .coding] {
+                for tiny in [false, true] {
+                    let frames = [0.1, 0.3, 0.65, 1.4].map {
+                        render(skin: skin, state: state, time: $0, reducedMotion: false, tiny: tiny)
+                    }
+                    try expect(Set(frames.map(\.data)).count == frames.count,
+                               "Every busy skin has readable changing frames, including at notch size")
+                    try expect(frames.allSatisfy { !$0.touchesEdge }, "Busy poses stay inside their canvas")
+                }
+            }
+            for state: CompanionState in [.finished, .needsAnswer, .needsReview] {
+                let settled = render(skin: skin, state: state, time: 2, reducedMotion: false)
+                let arrival = render(skin: skin, state: state, time: 0, reducedMotion: false, reactionProgress: 0)
+                let mid = render(skin: skin, state: state, time: 0.4, reducedMotion: false, reactionProgress: 0.4)
+                let ended = render(skin: skin, state: state, time: 2, reducedMotion: false, reactionProgress: 1)
+                try expect(arrival.data == settled.data && ended.data == settled.data,
+                           "A finite reaction begins and ends at the exact static pose")
+                try expect(mid.data != settled.data && !mid.touchesEdge,
+                           "Each actionable arrival has a visible, bounded reaction")
+                let reduced = render(skin: skin, state: state, time: 0.4, reducedMotion: true, reactionProgress: 0.4)
+                try expect(reduced.data == settled.data, "Reduce Motion suppresses arrival movement")
+                let invalid = render(skin: skin, state: state, time: 2, reducedMotion: false, reactionProgress: .infinity)
+                try expect(invalid.data == settled.data, "Invalid reaction progress safely settles")
+                for step in 0...20 {
+                    let frame = render(skin: skin, state: state, time: 0, reducedMotion: false,
+                                       reactionProgress: CGFloat(step) / 20)
+                    try expect(!frame.touchesEdge, "The whole reaction remains within the character region")
+                }
+            }
             let invalidTime = render(skin: skin, state: .working, time: .infinity, reducedMotion: false)
             try expect(invalidTime.occupied > 450, "Invalid clock value cannot break a character")
         }
@@ -51,7 +77,8 @@ struct CharacterSkinTests {
 
     @MainActor
     private static func render(skin: CharacterSkin, state: CompanionState, time: TimeInterval,
-                               reducedMotion: Bool, tiny: Bool = false) -> (data: Data, occupied: Int, touchesEdge: Bool) {
+                               reducedMotion: Bool, tiny: Bool = false,
+                               reactionProgress: CGFloat? = nil) -> (data: Data, occupied: Int, touchesEdge: Bool) {
         let edge = tiny ? 32 : 72
         let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: edge, pixelsHigh: edge,
             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
@@ -64,7 +91,8 @@ struct CharacterSkinTests {
         transform.scaleX(by: tiny ? 0.42 : 1, yBy: tiny ? -0.42 : -1)
         transform.concat()
         CharacterRenderer.draw(skin: skin, state: state, animationTime: time,
-            reducedMotion: reducedMotion, accent: NSColor(srgbRed: 0.64, green: 0.96, blue: 0.80, alpha: 1), showAura: false)
+            reducedMotion: reducedMotion, accent: NSColor(srgbRed: 0.64, green: 0.96, blue: 0.80, alpha: 1), showAura: false,
+            reactionProgress: reactionProgress)
         NSGraphicsContext.restoreGraphicsState()
         var occupied = 0
         var touchesEdge = false

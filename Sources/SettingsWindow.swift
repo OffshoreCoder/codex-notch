@@ -15,7 +15,7 @@ struct SettingsPreferences: Equatable {
     var powerActive = false
     var powerFailed = false
     var powerDetail: String? = nil
-    var version = "0.2.0"
+    var version = "0.2.1"
 }
 
 enum SettingsAction {

@@ -45,29 +45,51 @@ enum CharacterRenderer {
 
     static func draw(skin: CharacterSkin, state: CompanionState, animationTime: TimeInterval,
                      reducedMotion: Bool, origin: NSPoint = .zero, accent: NSColor,
-                     showAura: Bool = true, headphones: Bool = false) {
+                     showAura: Bool = true, headphones: Bool = false, reactionProgress: CGFloat? = nil) {
         NSGraphicsContext.saveGraphicsState()
         defer { NSGraphicsContext.restoreGraphicsState() }
         let t = reducedMotion || !animationTime.isFinite ? 0 : animationTime
         let busy = state == .working || state == .coding
-        let bob: CGFloat = busy ? CGFloat(sin(t * 3.4)) * 1.3
-            : (skin == .ghost && state == .idle ? CGFloat(sin(t * 1.8)) * 0.7 : 0)
+        let motion = SkinMotion(time: t, busy: busy && !reducedMotion,
+                                progress: reducedMotion ? nil : reactionProgress)
+        let bob: CGFloat = busy && !reducedMotion
+            ? CGFloat(sin(t * (skin == .ghost ? 2.8 : 3.4))) * (skin == .ghost ? 2.4 : 0.7) : 0
         let transform = NSAffineTransform()
-        transform.translateX(by: origin.x, yBy: origin.y + bob)
+        transform.translateX(by: origin.x + 28, yBy: origin.y + bob + 28 - motion.hop)
+        transform.rotate(byDegrees: motion.tilt)
+        transform.translateX(by: -28, yBy: -28)
         transform.concat()
         if showAura {
             accent.withAlphaComponent(0.08).setFill()
             NSBezierPath(ovalIn: NSRect(x: -8, y: -4, width: 73, height: 63)).fill()
         }
         switch skin {
-        case .robot: drawRobot(state: state, time: t, reducedMotion: reducedMotion, accent: accent)
-        case .cat: drawCat(state: state, time: t, reducedMotion: reducedMotion, accent: accent)
-        case .ghost: drawGhost(state: state, time: t, reducedMotion: reducedMotion, accent: accent)
-        case .astronaut: drawAstronaut(state: state, time: t, reducedMotion: reducedMotion, accent: accent)
+        case .robot: drawRobot(state: state, time: t, reducedMotion: reducedMotion, accent: accent, motion: motion)
+        case .cat: drawCat(state: state, time: t, reducedMotion: reducedMotion, accent: accent, motion: motion)
+        case .ghost: drawGhost(state: state, time: t, reducedMotion: reducedMotion, accent: accent, motion: motion)
+        case .astronaut: drawAstronaut(state: state, time: t, reducedMotion: reducedMotion, accent: accent, motion: motion)
         }
         if headphones { drawHeadphones(skin: skin) }
         if state == .coding { keyboard(time: t, color: skin == .robot ? mint : accent) }
         stateMark(state, accent: accent)
+    }
+
+    private struct SkinMotion {
+        let wave: CGFloat
+        let tap: CGFloat
+        let reaction: CGFloat
+        let hop: CGFloat
+        let tilt: CGFloat
+
+        init(time: TimeInterval, busy: Bool, progress: CGFloat?) {
+            wave = busy ? CGFloat(sin(time * 4.2)) : 0
+            tap = busy ? CGFloat(sin(time * 10)) : 0
+            let p = progress.flatMap { $0.isFinite && $0 >= 0 && $0 < 1 ? $0 : nil }
+            // Smoothly returns to the exact static pose at both ends.
+            reaction = p.map { sin($0 * .pi) } ?? 0
+            hop = reaction * 2.2
+            tilt = p.map { sin($0 * .pi * 4) * sin($0 * .pi) * 2.4 } ?? 0
+        }
     }
 
     private static func drawHeadphones(skin: CharacterSkin) {
@@ -86,9 +108,11 @@ enum CharacterRenderer {
         }
     }
 
-    private static func drawRobot(state: CompanionState, time: TimeInterval, reducedMotion: Bool, accent: NSColor) {
-        stroke(points: [NSPoint(x: 28, y: 6), NSPoint(x: 28, y: 0)], color: accent.withAlphaComponent(0.75), width: 2)
-        fillOval(NSRect(x: 25.5, y: -4, width: 5, height: 5), accent)
+    private static func drawRobot(state: CompanionState, time: TimeInterval, reducedMotion: Bool, accent: NSColor,
+                                  motion: SkinMotion) {
+        let antenna = motion.wave * 3 + motion.reaction * 2
+        stroke(points: [NSPoint(x: 28, y: 6), NSPoint(x: 28 + antenna, y: 0)], color: accent.withAlphaComponent(0.75), width: 2)
+        fillOval(NSRect(x: 25.5 + antenna, y: -4, width: 5, height: 5), accent)
         round(NSRect(x: -3, y: 21, width: 7, height: 15), radius: 3, color: color(0.14, 0.21, 0.20))
         round(NSRect(x: 51, y: 21, width: 7, height: 15), radius: 3, color: color(0.14, 0.21, 0.20))
         round(NSRect(x: 0, y: 6, width: 56, height: 43), radius: 13, color: mint)
@@ -97,21 +121,33 @@ enum CharacterRenderer {
         if state == .checking { fillOval(NSRect(x: 26.5, y: 32, width: 3, height: 3), accent) }
         round(NSRect(x: 11, y: 49, width: 11, height: 5), radius: 2, color: mint.withAlphaComponent(0.75))
         round(NSRect(x: 34, y: 49, width: 11, height: 5), radius: 2, color: mint.withAlphaComponent(0.75))
+        if state == .working || state == .coding || motion.reaction > 0 {
+            round(NSRect(x: 1, y: 40 + motion.tap * 2 - motion.reaction * 5, width: 12, height: 7), radius: 3, color: mint)
+            round(NSRect(x: 43, y: 40 - motion.tap * 2 - motion.reaction * 5, width: 12, height: 7), radius: 3, color: mint)
+        }
     }
 
-    private static func drawCat(state: CompanionState, time: TimeInterval, reducedMotion: Bool, accent: NSColor) {
+    private static func drawCat(state: CompanionState, time: TimeInterval, reducedMotion: Bool, accent: NSColor,
+                                motion: SkinMotion) {
         let fur = color(1, 0.79, 0.48)
         // A wide, readable ear silhouette survives the 24pt notch rendering.
         let ears = NSBezierPath()
-        ears.move(to: NSPoint(x: 2, y: 23)); ears.line(to: NSPoint(x: 3, y: 0))
+        let earTwitch = motion.wave * 2.3 + motion.reaction * 1.7
+        ears.move(to: NSPoint(x: 2, y: 23)); ears.line(to: NSPoint(x: 3 + earTwitch, y: 0))
         ears.line(to: NSPoint(x: 21, y: 13)); ears.line(to: NSPoint(x: 35, y: 13))
-        ears.line(to: NSPoint(x: 53, y: 0)); ears.line(to: NSPoint(x: 54, y: 23)); ears.close()
+        ears.line(to: NSPoint(x: 53 - earTwitch, y: 0)); ears.line(to: NSPoint(x: 54, y: 23)); ears.close()
         fur.setFill(); ears.fill()
         triangle([NSPoint(x: 7, y: 6), NSPoint(x: 8, y: 18), NSPoint(x: 17, y: 14)], color: color(0.80, 0.42, 0.31))
         triangle([NSPoint(x: 49, y: 6), NSPoint(x: 48, y: 18), NSPoint(x: 39, y: 14)], color: color(0.80, 0.42, 0.31))
         round(NSRect(x: 0, y: 12, width: 56, height: 38), radius: 16, color: fur)
-        round(NSRect(x: 10, y: 43, width: 14, height: 10), radius: 5, color: fur)
-        round(NSRect(x: 32, y: 43, width: 14, height: 10), radius: 5, color: fur)
+        let leftPaw = max(0, motion.tap) * 3 + motion.reaction * 4
+        let rightPaw = max(0, -motion.tap) * 3 + motion.reaction * 4
+        round(NSRect(x: 8, y: 43 - leftPaw, width: 14, height: 10), radius: 5, color: fur)
+        round(NSRect(x: 34, y: 43 - rightPaw, width: 14, height: 10), radius: 5, color: fur)
+        for x: CGFloat in [12, 16] {
+            stroke(points: [NSPoint(x: x, y: 49 - leftPaw), NSPoint(x: x, y: 52 - leftPaw)], color: color(0.81, 0.50, 0.29), width: 1)
+            stroke(points: [NSPoint(x: x + 26, y: 49 - rightPaw), NSPoint(x: x + 26, y: 52 - rightPaw)], color: color(0.81, 0.50, 0.29), width: 1)
+        }
         eyes(state: state, time: time, reducedMotion: reducedMotion, leftX: 14, rightX: 37, y: 25, color: color(0.20, 0.13, 0.12))
         triangle([NSPoint(x: 25, y: 35), NSPoint(x: 31, y: 35), NSPoint(x: 28, y: 38)], color: color(0.64, 0.30, 0.27))
         stroke(points: [NSPoint(x: -3, y: 31), NSPoint(x: 7, y: 33)], color: fur, width: 2)
@@ -124,19 +160,20 @@ enum CharacterRenderer {
         if state == .checking { fillOval(NSRect(x: 25, y: 41, width: 6, height: 4), accent) }
     }
 
-    private static func drawGhost(state: CompanionState, time: TimeInterval, reducedMotion: Bool, accent: NSColor) {
+    private static func drawGhost(state: CompanionState, time: TimeInterval, reducedMotion: Bool, accent: NSColor,
+                                  motion: SkinMotion) {
         let lavender = color(0.81, 0.74, 1)
         let body = NSBezierPath()
         body.move(to: NSPoint(x: 4, y: 51)); body.line(to: NSPoint(x: 4, y: 25))
         body.curve(to: NSPoint(x: 28, y: 2), controlPoint1: NSPoint(x: 4, y: 10), controlPoint2: NSPoint(x: 13, y: 2))
         body.curve(to: NSPoint(x: 52, y: 25), controlPoint1: NSPoint(x: 43, y: 2), controlPoint2: NSPoint(x: 52, y: 10))
-        body.line(to: NSPoint(x: 52, y: 51)); body.line(to: NSPoint(x: 44, y: 45))
-        body.line(to: NSPoint(x: 36, y: 53)); body.line(to: NSPoint(x: 28, y: 46))
-        body.line(to: NSPoint(x: 20, y: 53)); body.line(to: NSPoint(x: 12, y: 45)); body.close()
+        body.line(to: NSPoint(x: 52, y: 51)); body.line(to: NSPoint(x: 44, y: 45 + motion.wave))
+        body.line(to: NSPoint(x: 36, y: 53 - motion.wave)); body.line(to: NSPoint(x: 28, y: 46 + motion.wave))
+        body.line(to: NSPoint(x: 20, y: 53 - motion.wave)); body.line(to: NSPoint(x: 12, y: 45 + motion.wave)); body.close()
         lavender.setFill(); body.fill()
         // Soft shoulder lobes keep the silhouette distinct from a rounded robot head.
-        fillOval(NSRect(x: -2, y: 27, width: 13, height: 10), lavender)
-        fillOval(NSRect(x: 45, y: 27, width: 13, height: 10), lavender)
+        fillOval(NSRect(x: -2, y: 27 + motion.wave * 3 - motion.reaction * 6, width: 13, height: 10), lavender)
+        fillOval(NSRect(x: 45, y: 27 - motion.wave * 3 - motion.reaction * 6, width: 13, height: 10), lavender)
         eyes(state: state, time: time, reducedMotion: reducedMotion, leftX: 16, rightX: 35, y: 22, color: color(0.20, 0.15, 0.34))
         if state == .working || state == .checking {
             fillOval(NSRect(x: 25.5, y: 33, width: 5, height: 6), color(0.34, 0.25, 0.47))
@@ -147,16 +184,25 @@ enum CharacterRenderer {
         fillOval(NSRect(x: 40, y: 31, width: 7, height: 3), color(0.90, 0.52, 0.73).withAlphaComponent(0.65))
     }
 
-    private static func drawAstronaut(state: CompanionState, time: TimeInterval, reducedMotion: Bool, accent: NSColor) {
+    private static func drawAstronaut(state: CompanionState, time: TimeInterval, reducedMotion: Bool, accent: NSColor,
+                                      motion: SkinMotion) {
         let suit = color(0.91, 0.95, 1)
+        if state == .working || state == .coding || motion.reaction > 0 {
+            let thrust: CGFloat = reducedMotion ? 2 : 2 + (motion.wave + 1) * 2 + motion.reaction * 2
+            for x: CGFloat in [14, 36] {
+                triangle([NSPoint(x: x, y: 49), NSPoint(x: x + 6, y: 49), NSPoint(x: x + 3, y: 53 + thrust)],
+                         color: accent.withAlphaComponent(0.85))
+            }
+        }
         round(NSRect(x: 9, y: 30, width: 38, height: 23), radius: 9, color: suit)
         round(NSRect(x: 1, y: 16, width: 10, height: 20), radius: 4, color: color(0.48, 0.59, 0.72))
         round(NSRect(x: 45, y: 16, width: 10, height: 20), radius: 4, color: color(0.48, 0.59, 0.72))
         fillOval(NSRect(x: 2, y: 0, width: 52, height: 45), suit)
         round(NSRect(x: 8, y: 10, width: 40, height: 28), radius: 12, color: color(0.08, 0.18, 0.28))
         let reflection = NSBezierPath()
-        reflection.move(to: NSPoint(x: 14, y: 20))
-        reflection.curve(to: NSPoint(x: 24, y: 14), controlPoint1: NSPoint(x: 15, y: 16), controlPoint2: NSPoint(x: 19, y: 14))
+        let visorShift = motion.wave * 2
+        reflection.move(to: NSPoint(x: 14 + visorShift, y: 20))
+        reflection.curve(to: NSPoint(x: 24 + visorShift, y: 14), controlPoint1: NSPoint(x: 15 + visorShift, y: 16), controlPoint2: NSPoint(x: 19 + visorShift, y: 14))
         reflection.lineWidth = 2; reflection.lineCapStyle = .round
         NSColor.white.withAlphaComponent(0.23).setStroke(); reflection.stroke()
         eyes(state: state, time: time, reducedMotion: reducedMotion, leftX: 16, rightX: 35, y: 23, color: color(0.70, 0.89, 1))

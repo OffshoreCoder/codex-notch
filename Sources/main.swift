@@ -569,7 +569,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             shortcutError: dashboardShortcut?.error, energyStatus: "Адаптивная анимация · локальные события",
             powerStatus: powerText, powerActive: keepAwake.status == .active,
             powerFailed: keepAwake.status == .failed || keepAwake.lastError != nil, powerDetail: keepAwake.lastError,
-            version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.0"))
+            version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.1"))
     }
 
     private func finishQuiet() {

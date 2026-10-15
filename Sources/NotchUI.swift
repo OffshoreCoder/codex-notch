@@ -47,7 +47,8 @@ final class NotchController: NSObject, NSMenuDelegate {
     private var sleepObservers: [NSObjectProtocol] = []
     private var screenObserver: NSObjectProtocol?
     private var accessibilityObserver: NSObjectProtocol?
-    private var animationStarted = Date()
+    private var animationStarted = ProcessInfo.processInfo.systemUptime
+    private var reactionClock = CompanionReactionClock()
     private var expandedUntil = Date.distantPast
     private var attentionUntil = Date.distantPast
     private var hoverUntil = Date.distantPast
@@ -153,7 +154,10 @@ final class NotchController: NSObject, NSMenuDelegate {
     func update(_ snapshot: CompanionSnapshot) {
         let changed = self.snapshot.state != snapshot.state || self.snapshot.activeCount != snapshot.activeCount
         if self.snapshot.state != snapshot.state {
-            animationStarted = Date()
+            let now = ProcessInfo.processInfo.systemUptime
+            animationStarted = now
+            reactionClock.transition(to: CompanionReaction(rawValue: snapshot.state.rawValue), at: now)
+            companionView.animationTime = 0
             statusItem.button?.image = Self.menuBarImage(skin: skin, state: snapshot.state)
             statusItem.button?.image?.isTemplate = true
             statusItem.button?.contentTintColor = snapshot.state == .idle ? nil : snapshot.state.companionAccent
@@ -171,6 +175,11 @@ final class NotchController: NSObject, NSMenuDelegate {
         guard self.skin != skin else { return }
         self.skin = skin
         companionView.skin = skin
+        let now = ProcessInfo.processInfo.systemUptime
+        animationStarted = now
+        companionView.animationTime = 0
+        reactionClock.transition(to: CompanionReaction(rawValue: snapshot.state.rawValue), at: now, restart: true)
+        refreshRenderSchedule(now: now)
         companionView.needsDisplay = true
         statusItem.button?.image = Self.menuBarImage(skin: skin, state: snapshot.state)
         statusItem.button?.image?.isTemplate = true
@@ -360,7 +369,11 @@ final class NotchController: NSObject, NSMenuDelegate {
         }
         refreshExpansion(now: now)
         guard animate, renderSchedule.drawsAnimation else { return }
-        companionView.animationTime = now.timeIntervalSince(animationStarted)
+        let uptime = ProcessInfo.processInfo.systemUptime
+        companionView.animationTime = max(0, uptime - animationStarted)
+        // This also downgrades the existing timer to pointer-only work when a
+        // finite arrival cue ends. No extra timer or delayed work is created.
+        refreshRenderSchedule(now: uptime)
         companionView.needsDisplay = true
     }
 
@@ -369,6 +382,7 @@ final class NotchController: NSObject, NSMenuDelegate {
     func setDisplaySleeping(_ sleeping: Bool) {
         guard screenSleeping != sleeping else { return }
         screenSleeping = sleeping
+        reactionClock.cancel()
         refreshRenderSchedule()
         if !displaySleeping { refreshExpansion(); companionView.needsDisplay = true }
     }
@@ -376,12 +390,23 @@ final class NotchController: NSObject, NSMenuDelegate {
     private func setSystemSleeping(_ sleeping: Bool) {
         guard systemSleeping != sleeping else { return }
         systemSleeping = sleeping
+        // Uptime can pause during system sleep. Never replay a stale arrival cue
+        // after wake, even if it had only just begun before sleep.
+        reactionClock.cancel()
         refreshRenderSchedule()
         if !displaySleeping { refreshExpansion(); companionView.needsDisplay = true }
     }
 
-    private func refreshRenderSchedule() {
-        let animated = snapshot.state == .working || snapshot.state == .coding || snapshot.state == .checking
+    private func refreshRenderSchedule(now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        let reaction = reactionClock.progress(at: now)
+        let wasReacting = companionView.reactionProgress != nil
+        companionView.reactionProgress = reaction.map { CGFloat($0) }
+        // A heartbeat or power/layout event may expire the burst before the next
+        // animation tick. Always paint its final static pose before downgrading.
+        if wasReacting, reaction == nil, panel.isVisible, !displaySleeping {
+            companionView.needsDisplay = true
+        }
+        let animated = snapshot.state == .working || snapshot.state == .coding || snapshot.state == .checking || reaction != nil
         let schedule = CompanionRenderSchedule.resolve(visible: isVisible && panel.isVisible,
             displaySleeping: displaySleeping, animated: animated,
             reducedMotion: companionView.reducedMotion, lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled)
@@ -723,6 +748,7 @@ private final class CompanionView: NSView {
     var headphones = false
     var notice: String?
     var animationTime: TimeInterval = 0
+    var reactionProgress: CGFloat?
     var reducedMotion = false
     var onClick: (() -> Void)?
     var onPointerChanged: (() -> Void)?
@@ -809,7 +835,8 @@ private final class CompanionView: NSView {
             transform.scale(by: scale)
             transform.concat()
             CharacterRenderer.draw(skin: skin, state: snapshot.state, animationTime: animationTime,
-                                   reducedMotion: reducedMotion, accent: accent, showAura: false, headphones: headphones)
+                                   reducedMotion: reducedMotion, accent: accent, showAura: false, headphones: headphones,
+                                   reactionProgress: reactionProgress)
             NSGraphicsContext.restoreGraphicsState()
             if unreadCount > 0 {
                 mint.setFill()
@@ -831,7 +858,8 @@ private final class CompanionView: NSView {
         border.stroke()
 
         CharacterRenderer.draw(skin: skin, state: snapshot.state, animationTime: animationTime,
-                               reducedMotion: reducedMotion, origin: NSPoint(x: 23, y: 16), accent: accent, headphones: headphones)
+                               reducedMotion: reducedMotion, origin: NSPoint(x: 23, y: 16), accent: accent, headphones: headphones,
+                               reactionProgress: reactionProgress)
         drawText("CODEX", at: NSPoint(x: 96, y: 19), font: .systemFont(ofSize: 10, weight: .semibold),
                  color: NSColor.white.withAlphaComponent(0.48), tracking: 2.1)
         drawText(notice ?? snapshot.state.companionTitle, at: NSPoint(x: 96, y: 37),
