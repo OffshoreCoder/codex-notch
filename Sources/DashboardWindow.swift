@@ -104,6 +104,7 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
     private var sharing = false
     private let sharingButton = NSButton(image: NSImage(systemSymbolName: "eye.slash", accessibilityDescription: "Режим демонстрации") ?? NSImage(), target: nil, action: nil)
     private let privacyLabel = NSTextField(labelWithString: "Без чтения переписки")
+    private var feedbackTimer: Timer?
     private var filter = Filter.all
     private var isRenaming = false
     private var trackingMenu = false
@@ -286,8 +287,26 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
     }
 
     deinit {
+        feedbackTimer?.invalidate()
         if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
         if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
+    }
+
+    /// Routine feedback must never start a modal event loop or block the dashboard.
+    func showFeedback(_ text: String) {
+        feedbackTimer?.invalidate()
+        privacyLabel.stringValue = text
+        privacyLabel.textColor = DashboardPalette.green
+        privacyLabel.setAccessibilityValue(text)
+        feedbackTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.privacyLabel.stringValue = self.sharing ? "Скрыто только здесь" : "Без чтения переписки"
+                self.privacyLabel.textColor = DashboardPalette.dim
+                self.privacyLabel.setAccessibilityValue(self.privacyLabel.stringValue)
+                self.feedbackTimer = nil
+            }
+        }
     }
 
     func setScreenSharing(_ active: Bool) {

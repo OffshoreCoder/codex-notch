@@ -379,11 +379,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .copyAttentionInstruction:
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(Self.attentionInstruction, forType: .string)
-            let alert = NSAlert()
-            alert.messageText = "Инструкция скопирована"
-            alert.informativeText = "Вставь её в нужный чат Codex. Сигналы появятся, когда агент выполнит точный маркер через shell. Проверки разрешений не используются."
-            alert.addButton(withTitle: "Понятно")
-            alert.runModal()
+            dashboard.showFeedback("Скопировано: вставь в чат")
         }
         refresh()
     }
