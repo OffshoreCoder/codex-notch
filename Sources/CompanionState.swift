@@ -38,6 +38,7 @@ struct CompanionEvent: Codable {
     let toolName: String?
     let toolUseID: String?
     let timestamp: Date
+    var workingDirectory: String? = nil
 
     static let hookEvents: Set<String> = [
         "SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest",
@@ -76,10 +77,16 @@ struct CompanionEvent: Codable {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let event = object["hook_event_name"] as? String, hookEvents.contains(event),
               let session = identifier(object["session_id"]) else { return nil }
-        return CompanionEvent(event: event, sessionID: session,
+        var result = CompanionEvent(event: event, sessionID: session,
                               turnID: identifier(object["turn_id"]),
                               toolName: identifier(object["tool_name"]),
                               toolUseID: identifier(object["tool_use_id"]), timestamp: now)
+        if let cwd = object["cwd"] as? String, cwd.hasPrefix("/"), cwd.utf8.count <= 2048,
+           !cwd.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }),
+           !cwd.split(separator: "/").contains("..") {
+            result.workingDirectory = URL(fileURLWithPath: cwd).standardizedFileURL.path
+        }
+        return result
     }
 
     private static func identifier(_ value: Any?) -> String? {

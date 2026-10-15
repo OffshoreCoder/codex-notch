@@ -33,6 +33,7 @@ struct LocalData: Codable {
     var seenCompletions: [String] = []
     var chats: [String: ChatSummary] = [:]
     var labels: [String: String] = [:]
+    var workingDirectories: [String: String] = [:]
     var lastRealEvent: Date?
     var importantSessionID: String?
     var quietUntil: Date?
@@ -46,13 +47,14 @@ struct LocalData: Codable {
     var deferredAttentionIDs: [String] = []
 
     init() {}
-    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, lastRealEvent, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders, attention, seenAttention, deferredAttentionIDs }
+    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, workingDirectories, lastRealEvent, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders, attention, seenAttention, deferredAttentionIDs }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         completions = try c.decodeIfPresent([CompletedTurn].self, forKey: .completions) ?? []
         seenCompletions = try c.decodeIfPresent([String].self, forKey: .seenCompletions) ?? []
         chats = try c.decodeIfPresent([String: ChatSummary].self, forKey: .chats) ?? [:]
         labels = try c.decodeIfPresent([String: String].self, forKey: .labels) ?? [:]
+        workingDirectories = try c.decodeIfPresent([String: String].self, forKey: .workingDirectories) ?? [:]
         lastRealEvent = try c.decodeIfPresent(Date.self, forKey: .lastRealEvent)
         importantSessionID = try c.decodeIfPresent(String.self, forKey: .importantSessionID)
         quietUntil = try c.decodeIfPresent(Date.self, forKey: .quietUntil)
@@ -104,6 +106,16 @@ final class LocalStore {
             $0.seenCompletions = Array($0.seenCompletions.suffix(4096))
         }
         return true
+    }
+
+    func rememberWorkingDirectory(_ event: CompanionEvent) {
+        guard let path = event.workingDirectory, data.workingDirectories[event.sessionID] != path else { return }
+        update {
+            $0.workingDirectories[event.sessionID] = path
+            if $0.workingDirectories.count > 256 {
+                for key in $0.workingDirectories.keys.sorted().filter({ $0 != event.sessionID }).prefix($0.workingDirectories.count - 256) { $0.workingDirectories.removeValue(forKey: key) }
+            }
+        }
     }
 
     func selectImportant(_ sessionID: String?) { update { $0.importantSessionID = sessionID } }
@@ -260,7 +272,7 @@ final class LocalStore {
             if data.chats.count > 256 {
                 let keep = data.chats.values.sorted { $0.updatedAt > $1.updatedAt }.prefix(256)
                 data.chats = Dictionary(uniqueKeysWithValues: keep.map { ($0.id, $0) })
-                data.labels = data.labels.filter { data.chats[$0.key] != nil }
+                data.labels = data.labels.filter { self.data.chats[$0.key] != nil }
             }
         }
     }

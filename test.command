@@ -22,3 +22,6 @@ xcrun swiftc "${compiler_args[@]}" -lsqlite3 Sources/ThreadNames.swift Tests/Thr
 
 xcrun swiftc "${compiler_args[@]}" -framework AppKit -framework Carbon Sources/GlobalShortcut.swift Tests/KeyboardTests.swift -o .build/keyboard-tests
 ./.build/keyboard-tests
+
+xcrun swiftc "${compiler_args[@]}" Sources/ProjectContext.swift Tests/ProjectContextTests.swift -o .build/project-context-tests
+./.build/project-context-tests

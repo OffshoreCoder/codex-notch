@@ -109,6 +109,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastNameIDs: [String] = []
     private var nameReadInFlight = false
     private var nameReport: ThreadNames.Result?
+    private var contexts: [String: ProjectContext] = [:]
+    private var contextReadInFlight = false
+    private var lastContextRead = Date.distantPast
     private var timer: Timer?
     private var demo = option("--demo").flatMap(CompanionState.init(rawValue:))
     private let spool = EventSpool(directory: EventSpool.defaultDirectory)
@@ -213,6 +216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let accepted = event.event == "SessionEnd"
                     ? (previous.map { event.timestamp >= $0.updatedAt } ?? true)
                     : (current?.updatedAt == event.timestamp)
+                if accepted { library.rememberWorkingDirectory(event) }
                 if accepted, ["Stop", "Interrupt"].contains(event.event) { library.remember(model.chatSummaries()) }
                 library.clearAttentionForLifecycle(event, accepted: accepted)
                 if event.event == "SessionEnd", accepted { library.endSession(event.sessionID, at: event.timestamp) }
@@ -324,6 +328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return l != r ? l : left.updatedAt > right.updatedAt
         }
         refreshNames(sessionIDs: ordered.map(\.id))
+        refreshContexts()
         let entries = ordered.map { saved -> DashboardEntry in
             let chat = live[saved.id] ?? saved
             let state = live[saved.id] == nil && [.working, .coding, .checking].contains(saved.state)
@@ -347,6 +352,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         Self.duration($0.dueAt.timeIntervalSinceNow)
                 }.joined(separator: " · ") + (deferred.isEmpty ? "" : " · Напоминание ожидает окончания тишины"),
                 attentionText: request == nil ? "" : "Требует внимания")
+            entry.contextText = contexts[chat.id]?.displayText ?? ""
+            entry.contextPath = contexts[chat.id]?.workingDirectory ?? ""
             if request != nil { entry.status = .attention }
             else if [.working, .coding, .checking].contains(state) { entry.status = .running }
             else if state == .finished { entry.status = .completed }
@@ -360,6 +367,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func displayName(for sessionID: String) -> String {
         library.data.labels[sessionID] ?? codexNames[sessionID.lowercased()] ?? "Чат без названия"
+    }
+
+    private func refreshContexts() {
+        guard option("--preview") == nil, !contextReadInFlight, Date().timeIntervalSince(lastContextRead) >= 5 else { return }
+        let directories = library.data.workingDirectories
+        contextReadInFlight = true
+        lastContextRead = Date()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let reader = ProjectContextReader()
+            let result = directories.compactMapValues { reader.read(workingDirectory: $0) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.contexts = result
+                self.contextReadInFlight = false
+                self.updateDashboard()
+            }
+        }
     }
 
     private func refreshNames(sessionIDs: [String]) {

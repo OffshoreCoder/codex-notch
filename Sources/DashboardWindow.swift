@@ -17,6 +17,8 @@ struct DashboardEntry: Equatable {
     var canWatchDuration: Bool = false
     var reminderText: String = ""
     var attentionText: String = ""
+    var contextText: String = ""
+    var contextPath: String = ""
     var status: DashboardStatus = .idle
 }
 
@@ -706,8 +708,8 @@ private final class DashboardRow: NSView, NSMenuDelegate {
         star.isHidden = !entry.isImportant
         unread.stringValue = entry.unreadCount > 0 ? "новых: \(entry.unreadCount)" : ""
         unread.isHidden = entry.unreadCount == 0
-        identity.stringValue = "ID " + String(entry.id.prefix(8))
-        identity.toolTip = entry.id
+        identity.stringValue = entry.contextText.isEmpty ? "Контекст проекта ещё не получен" : entry.contextText
+        identity.toolTip = entry.contextPath.isEmpty ? nil : entry.contextPath
         state.update(text: entry.stateText, status: entry.status)
         elapsed.stringValue = entry.elapsedText
         updated.stringValue = entry.updatedText
