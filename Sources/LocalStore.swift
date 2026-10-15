@@ -376,13 +376,19 @@ final class LocalStore {
         update { $0.labels[sessionID] = label.isEmpty ? nil : label }
     }
     func name(for sessionID: String) -> String { data.labels[sessionID] ?? "Чат " + String(sessionID.prefix(8)) }
-    /// Opening is navigation. Explicit review requests and attached results require confirmation.
+    /// Opening is navigation. A question still needs an answer, and explicit
+    /// review requests and attached results still require confirmation.
     func markOpened(_ key: String) {
         let unreviewedResult = data.results[key].map { $0.timestamp > (data.reviewedResults[key] ?? .distantPast) } ?? false
         let needsReview = unreviewedResult || data.attention[key]?.kind == .review || data.reviewingIDs.contains(key)
         if needsReview {
             guard !data.reviewingIDs.contains(key) else { return }
             update { $0.reviewingIDs = Array(($0.reviewingIDs + [key]).suffix(512)) }
+        } else if data.attention[key]?.kind == .question {
+            // Preserve the unanswered question even if navigation acknowledges
+            // an ordinary completion from the same turn.
+            guard data.completions.contains(where: { $0.id == key }) else { return }
+            update { $0.completions.removeAll { $0.id == key } }
         } else { acknowledge(key) }
     }
     func openChat(_ sessionID: String) {

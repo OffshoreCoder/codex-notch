@@ -15,7 +15,8 @@ import Foundation
         tracker.receive(question, current: chat, attentionAccepted: accepted, lifecycleAccepted: false)
         assert(tracker.blockedSessionIDs == ["s"])
         store.openChat("s")
-        assert(store.data.attention.isEmpty)
+        assert(store.data.attention["s|t"]?.kind == .question)
+        assert(LocalStore(directory: directory).data.attention["s|t"]?.kind == .question)
         assert(KeepAwakePolicy.eligibleSessionIDs(enabled: true, isPreview: false, liveChats: [chat], blockedSessionIDs: tracker.blockedSessionIDs, now: now).isEmpty)
         store.acknowledgeChat("s")
         tracker.receive(event("PostToolUse", delta: 1), current: chat, attentionAccepted: false, lifecycleAccepted: true)
@@ -29,6 +30,6 @@ import Foundation
         tracker.receive(question, current: chat, attentionAccepted: true, lifecycleAccepted: false)
         tracker.receive(event("AttentionClear", delta: 4), current: chat, attentionAccepted: false, lifecycleAccepted: false)
         assert(tracker.blockedSessionIDs.isEmpty)
-        print("PASS: keep-awake question/read lifecycle (8 checks)")
+        print("PASS: keep-awake question/read lifecycle (9 checks)")
     }
 }
