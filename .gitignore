@@ -1,0 +1,6 @@
+.build/
+.codex-notch-runtime/
+*.log
+CodexNotch.app/
+VALIDATION.txt
+.DS_Store
