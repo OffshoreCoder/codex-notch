@@ -222,9 +222,9 @@ final class NotchController: NSObject, NSMenuDelegate {
     }
 
     /// A 2× rendering of the compact notch extension, without a screen capture.
-    func captureCompactPreview(to url: URL) {
+    func captureCompactPreview(to url: URL, scale: CGFloat = 2) {
         setExpanded(false)
-        writeViewBitmap(to: url)
+        writeViewBitmap(to: url, scale: scale)
     }
 
     /// Only our window and public display geometry; no other apps or screen pixels.
@@ -247,11 +247,11 @@ final class NotchController: NSObject, NSMenuDelegate {
          "width": Double(rect.width), "height": Double(rect.height)]
     }
 
-    private func writeViewBitmap(to url: URL) {
+    private func writeViewBitmap(to url: URL, scale: CGFloat = 2) {
         companionView.layoutSubtreeIfNeeded()
         let size = companionView.bounds.size
         guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil,
-                                            pixelsWide: Int(size.width * 2), pixelsHigh: Int(size.height * 2),
+                                            pixelsWide: Int(size.width * scale), pixelsHigh: Int(size.height * scale),
                                             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
                                             isPlanar: false, colorSpaceName: .deviceRGB,
                                             bytesPerRow: 0, bitsPerPixel: 0) else { return }

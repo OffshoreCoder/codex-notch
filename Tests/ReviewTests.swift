@@ -24,6 +24,11 @@ import Foundation
   assert(store.data.reviewingIDs == [review.id])
   store.acknowledgeAll()
   assert(store.data.reviewingIDs.isEmpty)
-  print("Review workflow: 7 checks passed")
+  store.markOpened(review.id)
+  assert(store.data.reviewingIDs.isEmpty)
+  let restarted = LocalStore(directory: dir)
+  restarted.markOpened(review.id)
+  assert(restarted.data.reviewingIDs.isEmpty)
+  print("Review workflow: 9 checks passed")
  }
 }

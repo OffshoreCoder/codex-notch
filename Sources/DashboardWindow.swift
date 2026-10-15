@@ -88,6 +88,7 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
     private let completedCount = NSTextField(labelWithString: "")
     private let focusStatus = NSTextField(labelWithString: "Все чаты могут уведомлять")
     private let quietButton = NSPopUpButton(frame: .zero, pullsDown: true)
+    private var groupControls: NSStackView?
     private let groupStatus = NSTextField(labelWithString: "Выбери ходы в меню ••• у чатов")
     private let groupButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private let startGroupItem = NSMenuItem(title: "Ждать выбранные ходы", action: nil, keyEquivalent: "")
@@ -211,10 +212,12 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
         groupButton.menu?.addItem(cancelGroupItem)
         let groupControls = NSStackView(views: [groupStatus, Self.spacer(), groupButton])
         groupControls.spacing = 8
+        groupControls.isHidden = true
+        self.groupControls = groupControls
         let top = NSStackView(views: [heading, counts, search, filterControl, focusControls, quietStatus, groupControls])
         top.orientation = .vertical
         top.alignment = .leading
-        top.spacing = 10
+        top.spacing = 8
         [heading, counts, search, filterControl, focusControls, quietStatus, groupControls].forEach {
             $0.widthAnchor.constraint(equalTo: top.widthAnchor).isActive = true
         }
@@ -301,6 +304,7 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
     @objc private func toggleSharing() { handler(.toggleSharing) }
 
     func updateGroup(text: String?, selectedCount: Int, hasGroup: Bool) {
+        groupControls?.isHidden = !hasGroup && selectedCount == 0
         groupStatus.stringValue = text ?? (selectedCount > 0 ? "Выбрано ходов: \(selectedCount)" : "Выбери ходы в меню ••• у чатов")
         groupStatus.toolTip = groupStatus.stringValue
         startGroupItem.title = "Ждать выбранные ходы (\(selectedCount))"
@@ -374,6 +378,7 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
     }
 
     func updateQuiet(status: String, active: Bool) {
+        quietStatus.isHidden = !active
         quietStatus.stringValue = status
         quietStatus.toolTip = status
         quietButton.item(at: 0)?.title = active ? "Тишина включена" : "Не отвлекать"
@@ -769,7 +774,7 @@ private final class DashboardRow: NSView, NSMenuDelegate {
         resultButton.font = .systemFont(ofSize: 11, weight: .medium)
         let actions = NSStackView(views: [open, resultButton, acknowledge, reminder])
         actions.spacing = 8
-        let content = NSStackView(views: [heading, identity, status, updated, resultLabel, reminderLabel, actions])
+        let content = NSStackView(views: [heading, identity, status, resultLabel, reminderLabel, actions])
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 7
@@ -782,7 +787,6 @@ private final class DashboardRow: NSView, NSMenuDelegate {
             content.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             heading.widthAnchor.constraint(equalTo: content.widthAnchor),
             identity.widthAnchor.constraint(equalTo: content.widthAnchor),
-            updated.widthAnchor.constraint(equalTo: content.widthAnchor),
             reminderLabel.widthAnchor.constraint(equalTo: content.widthAnchor)
         ])
         update(entry)
@@ -800,6 +804,7 @@ private final class DashboardRow: NSView, NSMenuDelegate {
         identity.toolTip = entry.contextPath.isEmpty ? nil : entry.contextPath
         state.update(text: entry.stateText, status: entry.status)
         elapsed.stringValue = entry.elapsedText
+        elapsed.toolTip = entry.updatedText
         updated.stringValue = entry.updatedText
         resultLabel.stringValue = entry.resultText
         resultLabel.isHidden = entry.resultText.isEmpty

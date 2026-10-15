@@ -80,6 +80,8 @@ if arguments.contains("--help") {
     CodexNotch — локальный персонаж у выреза Mac.
       --attention KIND --session UUID --turn ID  явный question/review/clear
       --preview-dashboard    вместе с --preview отрисовать демонстрацию пульта
+      --preview-scene NAME   panel/result/sharing/group, только выдуманные данные
+      --preview-scale N      масштаб compact-preview, от 1 до 16
       --health [--self-test] проверить настройки/путь и локальную запись без AppKit
       --demo STATE           idle/working/coding/checking/finished/interrupted/unknown
       --preview PATH         сохранить изображение собственного окна и завершить
@@ -191,7 +193,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             })
             for name in [NSWorkspace.didWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
                 wakeObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.resumed = true; self?.sessionActive = true }
+                    MainActor.assumeIsolated {
+                        self?.resumed = true
+                        if name == NSWorkspace.sessionDidBecomeActiveNotification { self?.sessionActive = true }
+                    }
                 })
             }
         }
@@ -208,7 +213,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     } else { self?.dashboard.show() }
                     self?.dashboard.capturePreview(to: URL(fileURLWithPath: path))
                 } else if arguments.contains("--compact-preview") {
-                    self?.controller.captureCompactPreview(to: URL(fileURLWithPath: path))
+                    self?.controller.captureCompactPreview(to: URL(fileURLWithPath: path), scale: min(16, max(1, CGFloat(Double(option("--preview-scale") ?? "2") ?? 2))))
                 } else {
                     self?.controller.capturePreview(to: URL(fileURLWithPath: path))
                 }
@@ -291,17 +296,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             absenceCompletions.removeAll(); absenceExplicit.removeAll(); absenceInterruptions.removeAll()
             // A later clear/new turn in the same batch must revoke an obsolete popup.
             explicitNotices = NotificationPolicy.pendingExplicit(explicitNotices, requests: library.data.attention)
+            if !library.data.attention.values.contains(where: { $0.kind == .question }) {
             for reminder in library.pollReminders(liveChats: model.chatSummaries()) {
                 explicitNotices.append(LocalNotice(title: reminder.kind == .result ? "Пора посмотреть результат" : "Ход всё ещё выполняется",
                     sessionID: reminder.sessionID, key: reminder.targetKey))
             }
             if let text = library.pollGroupNotice() { explicitNotices.append(LocalNotice(title: text, key: "group")) }
+            }
             let notices = NotificationPolicy.notices(completions: completionNotices, explicit: explicitNotices,
                 interruptions: interruptionNotices, codexForeground: NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.openai.codex",
                 catchingUp: catchingUp)
             for notice in notices { controller.notify(title: notice.title, sessionID: notice.sessionID) }
         }
-        if library.quietExpired() { finishQuiet() }
+        if sessionActive, library.quietExpired() { finishQuiet() }
         controller.setQuiet(library.isQuiet())
         let live = model.snapshot()
         let attention = library.data.attention.values.sorted { $0.requestedAt > $1.requestedAt }.first
@@ -523,16 +530,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     """
 
     private func populatePreview() {
+        let scene = option("--preview-scene") ?? "panel"
+        let sharing = scene == "sharing"
         var entries = [
-            DashboardEntry(id: "demo-a", name: "Review библиотеки", stateText: "Посмотри результат", elapsedText: "Ход: 7 мин", updatedText: "Последний сигнал: 12 с назад", unreadCount: 1, isImportant: true, canRemindResult: true, attentionText: "Требует внимания"),
-            DashboardEntry(id: "demo-b", name: "Исправление сборки", stateText: "Пишет код", elapsedText: "Ход: 3 мин", updatedText: "Последний сигнал: 2 с назад", unreadCount: 0, canWatchDuration: true, reminderText: "Проверить длительность через 7 мин"),
-            DashboardEntry(id: "demo-c", name: "Проверка тестов", stateText: "Ход завершён", elapsedText: "Ход: 42 с", updatedText: "Последний сигнал: 2 мин назад", unreadCount: 2, canRemindResult: true)
+            DashboardEntry(id: "11111111-1111-4111-8111-111111111111", name: "Исправление кеша", stateText: "Ход завершён", elapsedText: "Ход: 7 мин", updatedText: "Последний сигнал: 12 с назад", unreadCount: 1, canRemindResult: true),
+            DashboardEntry(id: "22222222-2222-4222-8222-222222222222", name: "Миграция API", stateText: "Пишет код", elapsedText: "Ход: 3 мин", updatedText: "Последний сигнал: 2 с назад", unreadCount: 0, canWatchDuration: true),
+            DashboardEntry(id: "33333333-3333-4333-8333-333333333333", name: "Проверка сборки", stateText: "Ход завершён", elapsedText: "Ход: 42 с", updatedText: "Последний сигнал: 2 мин назад", unreadCount: 1, canRemindResult: true)
         ]
-        entries[0].status = .attention
+        entries[0].contextText = "backend · fix/cache · копия: cache-fix"
+        entries[1].contextText = "backend · feature/api"
+        entries[2].contextText = "frontend · main"
+        entries[0].status = scene == "result" ? .attention : .completed
         entries[1].status = .running
         entries[2].status = .completed
+        if scene == "result" {
+            entries[0].isReviewing = true
+            entries[0] = DashboardEntry(id: entries[0].id, name: entries[0].name, stateText: "На проверке", elapsedText: "Ход: 7 мин", updatedText: "Последний сигнал: 12 с назад", unreadCount: 1, canRemindResult: true, attentionText: "Требует проверки", resultID: "demo-result", resultText: "Агент сообщил: проверки пройдены", canOpenResult: true, isReviewing: true, contextText: "backend · fix/cache · копия: cache-fix", status: .attention)
+        }
+        if sharing {
+            let mask = PrivacyPresentation(orderedSessionIDs: entries.map(\.id))
+            for index in entries.indices {
+                let original = entries[index]
+                entries[index] = DashboardEntry(id: original.id, name: mask.name(for: original.id, original: original.name, isSharing: true), stateText: original.stateText, elapsedText: original.elapsedText, updatedText: original.updatedText, unreadCount: original.unreadCount, canRemindResult: original.canRemindResult, canWatchDuration: original.canWatchDuration, isMasked: true, status: original.status)
+            }
+        }
+        dashboard.setScreenSharing(sharing)
         dashboard.update(entries: entries)
-        dashboard.updateQuiet(status: "Тишина ещё 18 мин", active: true)
+        dashboard.updateQuiet(status: scene == "group" ? "Тишина ещё 18 мин" : "Уведомления включены", active: scene == "group")
+        dashboard.updateGroup(text: scene == "group" ? "Завершены 2 из 3" : nil, selectedCount: 0, hasGroup: scene == "group")
     }
 
     private static func duration(_ seconds: TimeInterval) -> String {

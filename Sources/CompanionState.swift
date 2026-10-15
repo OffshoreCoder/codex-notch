@@ -30,7 +30,8 @@ struct ChatSummary: Codable, Equatable {
     var endedAt: Date? = nil
 }
 
-/// This is the complete on-disk event schema. No prompt, command, code or transcript.
+/// Bounded event metadata, root directory and explicitly attached result only.
+/// No prompt, arbitrary command, code, tool output or transcript.
 struct CompanionEvent: Codable {
     let event: String
     let sessionID: String

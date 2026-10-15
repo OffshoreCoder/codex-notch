@@ -33,6 +33,7 @@ import Foundation
         store.beginQuiet(seconds: nil)
         store.receiveGroup(event("Stop", "a", "1"), accepted: true, current: chat)
         assert(store.pollGroupNotice() == nil)
+        store.record(CompletedTurn(sessionID: "a", turnID: "1", startedAt: now, finishedAt: now))
         assert(store.endQuiet() == 1)
         assert(store.pollGroupNotice() == nil && store.data.turnGroup?.notified == true)
         print("Turn groups: 13 checks passed")

@@ -36,6 +36,7 @@ struct LocalData: Codable {
     var screenSharing = false
     var archivedChats: [String: Date] = [:]
     var turnGroup: TurnGroup? = nil
+    var reviewedResults: [String: Date] = [:]
     var reviewingIDs: [String] = []
     var results: [String: TurnResult] = [:]
     var workingDirectories: [String: String] = [:]
@@ -52,7 +53,7 @@ struct LocalData: Codable {
     var deferredAttentionIDs: [String] = []
 
     init() {}
-    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, workingDirectories, results, reviewingIDs, turnGroup, archivedChats, screenSharing, lastRealEvent, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders, attention, seenAttention, deferredAttentionIDs }
+    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, workingDirectories, results, reviewingIDs, reviewedResults, turnGroup, archivedChats, screenSharing, lastRealEvent, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders, attention, seenAttention, deferredAttentionIDs }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         completions = try c.decodeIfPresent([CompletedTurn].self, forKey: .completions) ?? []
@@ -62,6 +63,7 @@ struct LocalData: Codable {
         screenSharing = try c.decodeIfPresent(Bool.self, forKey: .screenSharing) ?? false
         archivedChats = try c.decodeIfPresent([String: Date].self, forKey: .archivedChats) ?? [:]
         turnGroup = try c.decodeIfPresent(TurnGroup.self, forKey: .turnGroup)
+        reviewedResults = try c.decodeIfPresent([String: Date].self, forKey: .reviewedResults) ?? [:]
         reviewingIDs = try c.decodeIfPresent([String].self, forKey: .reviewingIDs) ?? []
         results = try c.decodeIfPresent([String: TurnResult].self, forKey: .results) ?? [:]
         workingDirectories = try c.decodeIfPresent([String: String].self, forKey: .workingDirectories) ?? [:]
@@ -177,7 +179,7 @@ final class LocalStore {
               result.sessionID == event.sessionID, result.turnID == event.turnID,
               current.id == result.sessionID, current.turnID == result.turnID,
               event.timestamp >= current.updatedAt, ![.idle, .interrupted].contains(current.state),
-              data.results[result.id].map({ $0.timestamp < result.timestamp }) ?? true else { return false }
+              data.results[result.id].map({ $0.timestamp < result.timestamp && ($0.path != result.path || $0.checks != result.checks) }) ?? true else { return false }
         update {
             $0.archivedChats.removeValue(forKey: event.sessionID)
             $0.results[result.id] = result
@@ -189,7 +191,8 @@ final class LocalStore {
     }
 
     func rememberWorkingDirectory(_ event: CompanionEvent) {
-        guard let path = event.workingDirectory, data.workingDirectories[event.sessionID] != path else { return }
+        guard let path = event.workingDirectory, data.workingDirectories[event.sessionID] != path,
+              ["SessionStart", "UserPromptSubmit"].contains(event.event) || data.workingDirectories[event.sessionID] == nil else { return }
         update {
             $0.workingDirectories[event.sessionID] = path
             if $0.workingDirectories.count > 256 {
@@ -212,7 +215,7 @@ final class LocalStore {
     /// Returns one summary count; viewed results and unselected chats never reappear.
     @discardableResult func endQuiet() -> Int {
         let completionKeys = data.completions.filter {
-            data.deferredCompletionIDs.contains($0.id) &&
+            data.deferredCompletionIDs.contains($0.id) && !isGrouped($0.id) &&
                 (data.importantSessionID == nil || data.importantSessionID == $0.sessionID)
         }.map(\.id)
         let reminderKeys = data.deferredReminders.filter { reminder in
@@ -367,7 +370,8 @@ final class LocalStore {
     func name(for sessionID: String) -> String { data.labels[sessionID] ?? "Чат " + String(sessionID.prefix(8)) }
     /// Opening is navigation. Explicit review requests and attached results require confirmation.
     func markOpened(_ key: String) {
-        let needsReview = data.results[key] != nil || data.attention[key]?.kind == .review || data.reviewingIDs.contains(key)
+        let unreviewedResult = data.results[key].map { $0.timestamp > (data.reviewedResults[key] ?? .distantPast) } ?? false
+        let needsReview = unreviewedResult || data.attention[key]?.kind == .review || data.reviewingIDs.contains(key)
         if needsReview {
             guard !data.reviewingIDs.contains(key) else { return }
             update { $0.reviewingIDs = Array(($0.reviewingIDs + [key]).suffix(512)) }
@@ -381,17 +385,19 @@ final class LocalStore {
 
     func acknowledgeChat(_ sessionID: String) {
         update {
+            for result in $0.results.values where result.sessionID == sessionID { $0.reviewedResults[result.id] = result.timestamp }
             $0.reviewingIDs.removeAll { $0.hasPrefix(sessionID + "|") }
             $0.completions.removeAll { $0.sessionID == sessionID }
             $0.attention = $0.attention.filter { $0.value.sessionID != sessionID }
         }
     }
 
-    func acknowledge(_ id: String) { update { $0.reviewingIDs.removeAll { $0 == id }; $0.completions.removeAll { $0.id == id }; $0.attention.removeValue(forKey: id) } }
-    func acknowledgeAll() { update { $0.reviewingIDs.removeAll(); $0.completions.removeAll(); $0.attention.removeAll() } }
+    func acknowledge(_ id: String) { update { if let result = $0.results[id] { $0.reviewedResults[id] = result.timestamp }; $0.reviewingIDs.removeAll { $0 == id }; $0.completions.removeAll { $0.id == id }; $0.attention.removeValue(forKey: id) } }
+    func acknowledgeAll() { update { for result in $0.results.values { $0.reviewedResults[result.id] = result.timestamp }; $0.reviewingIDs.removeAll(); $0.completions.removeAll(); $0.attention.removeAll() } }
 
     func update(_ change: (inout LocalData) -> Void) {
         change(&data)
+        if data.reviewedResults.count > 4096 { data.reviewedResults = Dictionary(uniqueKeysWithValues: data.reviewedResults.sorted { $0.value > $1.value }.prefix(4096).map { ($0.key, $0.value) }) }
         guard canWrite else { return }
         do {
             try EventSpool(directory: directory).prepare()
