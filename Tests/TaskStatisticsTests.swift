@@ -75,6 +75,18 @@ struct TaskStatisticsTests {
         try expect(snap(stats).summedDuration == 90, "Accepted session end closes interval conservatively")
         try expect(snap(stats).completed == 1, "Session end is not task success")
         try expect(snap(stats).tokens == nil, "No synthetic tokens from time")
+        let missingID = TaskStatistics(directory: root.appendingPathComponent("missing-turn-id"), now: base)
+        let noIDPrompt = event("UserPromptSubmit", a, nil, 0)
+        let localKey = "local-\(base.timeIntervalSince1970)"
+        missingID.observe(event: noIDPrompt, accepted: true,
+            current: ChatSummary(id: a, turnID: localKey, state: .working, startedAt: base, updatedAt: base))
+        receive(missingID, "PostToolUse", a, "child-id", 10)
+        try expect(missingID.data.records[0].turnID == localKey, "Child event cannot rename an unknown root ID")
+        let rootStop = event("Stop", a, "actual-root-id", 60)
+        missingID.observe(event: rootStop, accepted: true,
+            current: ChatSummary(id: a, turnID: "actual-root-id", state: .finished, startedAt: base, updatedAt: rootStop.timestamp, endedAt: rootStop.timestamp))
+        try expect(snap(missingID).summedDuration == 60 && snap(missingID).completed == 1, "Accepted terminal may close an exact-start root whose prompt omitted turn_id")
+        try expect(missingID.data.records[0].turnID == "actual-root-id", "Adopted terminal identity persists for root accounting")
     }
     static func assignmentAndPrivacy(_ root: URL) throws {
         let dir = root.appendingPathComponent("privacy")

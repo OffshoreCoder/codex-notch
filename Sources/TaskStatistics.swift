@@ -145,7 +145,15 @@ final class TaskStatistics {
         guard let index = data.records.lastIndex(where: { $0.sessionID == id && $0.endedAt == nil }),
               now >= data.records[index].lastSeen else { return }
         let record = data.records[index]
-        if event.event != "SessionEnd", let turn = event.turnID, turn != record.turnID { return }
+        if event.event != "SessionEnd", let turn = event.turnID, turn != record.turnID {
+            // Some Codex versions omit a root ID on UserPromptSubmit and add it
+            // only at Stop. Adopt it only from the model's accepted terminal for
+            // the exact observed start; child-tool IDs remain ineligible.
+            guard record.turnID.hasPrefix("local-"), ["Stop", "Interrupt"].contains(event.event),
+                  current?.id == event.sessionID, current?.startedAt == record.startedAt,
+                  current?.turnID == turn, Self.validTurn(turn) else { return }
+            data.records[index].turnID = turn
+        }
         guard CompanionEvent.hookEvents.contains(event.event) || CompanionEvent.attentionEvents.contains(event.event) else { return }
         data.records[index].lastSeen = now
         if ["Stop", "Interrupt", "SessionEnd"].contains(event.event) {
