@@ -12,7 +12,32 @@ struct EventSpool {
         let bundle = Bundle.main.bundleURL
         let root = bundle.pathExtension == "app" ? bundle.deletingLastPathComponent()
             : URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.deletingLastPathComponent()
-        return root.appendingPathComponent(".codex-notch-runtime", isDirectory: true)
+        return sharedDirectory(fallback: root.appendingPathComponent(".codex-notch-runtime", isDirectory: true))
+    }
+
+    private static let runtimePreference = "CodexNotch.runtimeDirectory.v1"
+    // A separate suite works in both the GUI bundle and its CLI hook process.
+    // macOS rejects using the calling bundle's own ID as a suite name.
+    private static var sharedPreferences: UserDefaults? { UserDefaults(suiteName: "local.codex.notch.shared") }
+
+    /// Copies keep using the first running app's private queue. Hook processes
+    /// only read this setting; the UI registers it after acquiring its global lock.
+    static func sharedDirectory(fallback: URL, preferences: UserDefaults? = nil) -> URL {
+        let defaults = preferences ?? sharedPreferences
+        guard let path = defaults?.string(forKey: runtimePreference), path.hasPrefix("/"),
+              !path.utf8.contains(0), URL(fileURLWithPath: path).lastPathComponent == ".codex-notch-runtime" else {
+            return fallback
+        }
+        return URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+    }
+
+    static func rememberSharedDirectory(_ directory: URL, preferences: UserDefaults? = nil) {
+        let defaults = preferences ?? sharedPreferences
+        let chosen = sharedDirectory(fallback: directory, preferences: defaults)
+        guard chosen == directory, defaults?.string(forKey: runtimePreference) != directory.path else { return }
+        defaults?.set(directory.path, forKey: runtimePreference)
+        // The next process may be a hook or another app copy opened immediately.
+        defaults?.synchronize()
     }
 
     func prepare() throws {

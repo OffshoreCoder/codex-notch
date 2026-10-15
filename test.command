@@ -71,6 +71,9 @@ xcrun swiftc "${compiler_args[@]}" -lsqlite3 Sources/ResultSignal.swift Sources/
 xcrun swiftc "${compiler_args[@]}" Sources/InstanceLock.swift Tests/InstanceLockTests.swift -o .build/instance-lock-tests
 ./.build/instance-lock-tests
 
+xcrun swiftc "${compiler_args[@]}" Sources/ResultSignal.swift Sources/TurnGroup.swift Sources/CompanionState.swift Sources/LocalStore.swift Sources/EventSpool.swift Tests/RuntimeLocationTests.swift -o .build/runtime-location-tests
+./.build/runtime-location-tests
+
 if [[ "${CODEX_NOTCH_TEST_NATIVE_POWER:-0}" == "1" ]]; then
   xcrun swiftc "${compiler_args[@]}" -framework IOKit Sources/ResultSignal.swift Sources/TurnGroup.swift Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Sources/KeepAwake.swift Tests/KeepAwakeNativeTests.swift -o .build/keep-awake-native-tests
   ./.build/keep-awake-native-tests --run-native-smoke

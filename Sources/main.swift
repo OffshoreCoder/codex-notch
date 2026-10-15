@@ -151,6 +151,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApplication.shared.terminate(nil)
             return
         }
+        if option("--preview") == nil, ProcessInfo.processInfo.environment["CODEX_NOTCH_DATA_DIR"] == nil {
+            EventSpool.rememberSharedDirectory(spool.directory)
+        }
         if option("--preview") != nil {
             previewDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("CodexNotch-preview-" + UUID().uuidString)
         }
