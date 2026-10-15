@@ -122,7 +122,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for event in events {
                 model.receive(event)
                 if let result = model.completion(for: event), library.record(result) {
-                    controller.notify(title: "Ход завершён", sessionID: result.sessionID)
+                    if library.shouldNotify(result.sessionID) {
+                        controller.notify(title: "Ход завершён", sessionID: result.sessionID)
+                    }
+                }
+                if event.event == "Interrupt", library.shouldNotify(event.sessionID),
+                   model.chatSummaries().contains(where: {
+                       $0.id == event.sessionID && $0.state == .interrupted && $0.updatedAt == event.timestamp
+                   }) {
+                    controller.notify(title: "Ход остановлен", sessionID: event.sessionID, duration: 4)
                 }
             }
             if !events.isEmpty { library.remember(model.chatSummaries()) }
@@ -142,6 +150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if controller.openChat(id) { library.acknowledgeChat(id) }
         case .acknowledgeChat(let id): library.acknowledgeChat(id)
         case .rename(let id, let name): library.rename(id, to: name)
+        case .important(let id): library.selectImportant(id)
         }
         refresh()
     }
@@ -169,7 +178,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 stateText: state == .finished ? "Ход завершён" : state.companionTitle,
                 elapsedText: state == .unknown ? "Последнее известное состояние" : elapsed,
                 updatedText: "Последний сигнал: " + Self.duration(Date().timeIntervalSince(chat.updatedAt)) + " назад",
-                unreadCount: library.data.completions.filter { $0.sessionID == chat.id }.count)
+                unreadCount: library.data.completions.filter { $0.sessionID == chat.id }.count,
+                isImportant: library.data.importantSessionID == chat.id)
         }
         dashboard.update(entries: entries)
     }

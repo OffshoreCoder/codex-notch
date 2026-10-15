@@ -100,10 +100,6 @@ final class NotchController: NSObject, NSMenuDelegate {
     func update(_ snapshot: CompanionSnapshot) {
         if self.snapshot.state != snapshot.state {
             animationStarted = Date()
-            let attentionDuration: TimeInterval = snapshot.state == .interrupted ? 4 : 0
-            if attentionDuration > 0 {
-                attentionUntil = max(attentionUntil, Date().addingTimeInterval(attentionDuration))
-            }
             statusItem.button?.image = Self.menuBarImage(state: snapshot.state)
             statusItem.button?.image?.isTemplate = true
             statusItem.button?.contentTintColor = snapshot.state == .idle ? nil : snapshot.state.companionAccent

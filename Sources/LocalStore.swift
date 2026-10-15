@@ -13,15 +13,17 @@ struct LocalData: Codable {
     var seenCompletions: [String] = []
     var chats: [String: ChatSummary] = [:]
     var labels: [String: String] = [:]
+    var importantSessionID: String?
 
     init() {}
-    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels }
+    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, importantSessionID }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         completions = try c.decodeIfPresent([CompletedTurn].self, forKey: .completions) ?? []
         seenCompletions = try c.decodeIfPresent([String].self, forKey: .seenCompletions) ?? []
         chats = try c.decodeIfPresent([String: ChatSummary].self, forKey: .chats) ?? [:]
         labels = try c.decodeIfPresent([String: String].self, forKey: .labels) ?? [:]
+        importantSessionID = try c.decodeIfPresent(String.self, forKey: .importantSessionID)
     }
 }
 
@@ -60,6 +62,11 @@ final class LocalStore {
             $0.seenCompletions = Array($0.seenCompletions.suffix(4096))
         }
         return true
+    }
+
+    func selectImportant(_ sessionID: String?) { update { $0.importantSessionID = sessionID } }
+    func shouldNotify(_ sessionID: String) -> Bool {
+        data.importantSessionID == nil || data.importantSessionID == sessionID
     }
 
     func remember(_ chats: [ChatSummary]) {

@@ -8,12 +8,14 @@ struct DashboardEntry: Equatable {
     let elapsedText: String
     let updatedText: String
     let unreadCount: Int
+    var isImportant: Bool = false
 }
 
 enum DashboardAction {
     case openChat(String)
     case acknowledgeChat(String)
     case rename(String, String)
+    case important(String?)
 }
 
 /// Explicitly opened, keyboard-accessible window. The notch itself remains passive.
@@ -46,7 +48,7 @@ final class DashboardController: NSObject {
         summary.font = .systemFont(ofSize: 12)
         summary.textColor = .secondaryLabelColor
         summary.lineBreakMode = .byWordWrapping
-        summary.maximumNumberOfLines = 2
+        summary.maximumNumberOfLines = 3
 
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
@@ -98,9 +100,12 @@ final class DashboardController: NSObject {
 
     private func renderEntries() {
         let unread = entries.reduce(0) { $0 + max(0, $1.unreadCount) }
+        let notificationText = entries.contains(where: \.isImportant)
+            ? "Автоуведомления только от выбранного чата; остальные результаты остаются в очереди."
+            : "Автоуведомления от всех чатов. Можно выбрать один важный."
         summary.stringValue = entries.isEmpty
             ? "Здесь появятся чаты после событий Codex. Названия можно задать вручную."
-            : "Чатов: \(entries.count) · непросмотренных результатов: \(unread). Названия хранятся только на этом Mac."
+            : "Чатов: \(entries.count) · непросмотренных результатов: \(unread). \(notificationText)"
         if renderedEntries.map(\.id) == entries.map(\.id), rowViews.count == entries.count, !entries.isEmpty {
             for (row, entry) in zip(rowViews, entries) { row.update(entry) }
         } else {
@@ -170,6 +175,8 @@ private final class DashboardRow: NSView {
     private let state = NSTextField(labelWithString: "")
     private let elapsed = NSTextField(labelWithString: "")
     private let updated = NSTextField(labelWithString: "")
+    private let importantLabel = NSTextField(labelWithString: "")
+    private let important = NSButton(checkboxWithTitle: "Уведомлять об этом", target: nil, action: nil)
     private let acknowledge = NSButton(title: "Просмотрено", target: nil, action: nil)
     private var entry: DashboardEntry
     private let handler: (DashboardAction) -> Void
@@ -196,6 +203,11 @@ private final class DashboardRow: NSView {
         updated.font = .systemFont(ofSize: 11)
         updated.textColor = .secondaryLabelColor
         updated.lineBreakMode = .byTruncatingTail
+        importantLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        importantLabel.textColor = .controlAccentColor
+        important.font = .systemFont(ofSize: 11)
+        important.target = self
+        important.action = #selector(toggleImportant)
 
         let open = NSButton(title: "Открыть чат", target: self, action: #selector(openChat))
         let rename = NSButton(title: "Название…", target: self, action: #selector(renameChat))
@@ -213,7 +225,9 @@ private final class DashboardRow: NSView {
         status.spacing = 10
         let actions = NSStackView(views: [open, rename, acknowledge])
         actions.spacing = 8
-        let content = NSStackView(views: [heading, status, updated, actions])
+        let notification = NSStackView(views: [important, importantLabel])
+        notification.spacing = 10
+        let content = NSStackView(views: [heading, status, updated, notification, actions])
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 6
@@ -241,9 +255,12 @@ private final class DashboardRow: NSView {
         elapsed.stringValue = entry.elapsedText
         updated.stringValue = entry.updatedText
         acknowledge.isEnabled = entry.unreadCount > 0
+        important.state = entry.isImportant ? .on : .off
+        importantLabel.stringValue = entry.isImportant ? "Выбран для уведомлений" : ""
     }
 
     @objc private func openChat() { handler(.openChat(entry.id)) }
     @objc private func acknowledgeChat() { handler(.acknowledgeChat(entry.id)) }
     @objc private func renameChat() { handler(.rename(entry.id, entry.name)) }
+    @objc private func toggleImportant() { handler(.important(entry.isImportant ? nil : entry.id)) }
 }
