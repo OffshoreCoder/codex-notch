@@ -80,7 +80,7 @@ if arguments.contains("--help") {
     CodexNotch — локальный персонаж у выреза Mac.
       --attention KIND --session UUID --turn ID  явный question/review/clear
       --preview-dashboard    вместе с --preview отрисовать демонстрацию пульта
-      --preview-scene NAME   panel/result/sharing/group/awake, только выдуманные данные
+      --preview-scene NAME   panel/result/sharing/group/awake/statistics/settings, выдуманные данные
       --preview-scale N      масштаб compact-preview, от 1 до 16
       --health [--self-test] проверить настройки/путь и локальную запись без AppKit
       --demo STATE           idle/working/coding/checking/finished/interrupted/unknown
@@ -107,6 +107,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var powerEventsAfter = Date.distantPast
     private var library: LocalStore!
     private var dashboard: DashboardController!
+    private var statistics: TaskStatistics!
+    private var statisticsWindow: StatisticsController!
+    private var tokenReport = TaskTokenReader.Result.unavailable
+    private var tokenReadInFlight = false
+    private var lastTokenRead = Date.distantPast
+    private var lastStatisticsRender = Date.distantPast
     private var dashboardShortcut: GlobalShortcutController?
     private var health: HealthController!
     private var previewDirectory: URL?
@@ -145,8 +151,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             previewDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("CodexNotch-preview-" + UUID().uuidString)
         }
         library = LocalStore(directory: previewDirectory ?? spool.directory)
+        statistics = TaskStatistics(directory: previewDirectory ?? spool.directory,
+            now: option("--preview") == nil ? Date() : Date().addingTimeInterval(-86400))
+        statistics.setEnabled(library.data.statisticsEnabled)
         controller = NotchController()
         dashboard = DashboardController(handler: { [weak self] action in self?.handle(action) })
+        statisticsWindow = StatisticsController(provider: { [unowned self] period in self.statisticsSnapshot(period) },
+            action: { [weak self] action in
+                guard let self else { return }
+                switch action {
+                case .openChat(let id): self.handle(.openChat(id)); self.statisticsWindow.hide()
+                case .assignTicket(let id, let ticket): _ = self.statistics.assign(ticket: ticket, to: id)
+                case .reset: self.statistics.reset()
+                }
+            })
         health = HealthController(reportProvider: { [weak self] selfTest in
             let baseReport = IntegrationHealth.check(hooksURL: FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".codex/hooks.json"),
@@ -219,6 +237,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 MainActor.assumeIsolated {
                     self?.powerEventsAfter = Date()
                     self?.keepAwake.stop()
+                    self?.statistics.suspend()
                 }
             })
             wakeObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
@@ -240,7 +259,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refresh()
         if let path = option("--preview") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                if arguments.contains("--preview-dashboard") {
+                if option("--preview-scene") == "statistics", let self {
+                    self.populateStatisticsPreview()
+                    self.statisticsWindow.show()
+                    self.statisticsWindow.capturePreview(to: URL(fileURLWithPath: path))
+                } else if arguments.contains("--preview-dashboard") {
                     self?.populatePreview()
                     if let self, let location = self.controller.dashboardLocation() {
                         self.dashboard.show(anchor: location.anchor, screen: location.screen)
@@ -265,6 +288,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         keepAwake.stop()
+        statistics?.suspend()
         spoolWatcher?.stop()
         timer?.invalidate()
         if let previewDirectory { try? FileManager.default.removeItem(at: previewDirectory) }
@@ -296,6 +320,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let accepted = event.event == "SessionEnd"
                     ? (previous.map { event.timestamp >= $0.updatedAt } ?? true)
                     : (current?.updatedAt == event.timestamp)
+                statistics.observe(event: event, accepted: accepted || attentionAccepted, current: current)
                 keepAwakeQuestions.receive(event, current: current, attentionAccepted: attentionAccepted, lifecycleAccepted: accepted)
                 library.restoreForEvent(event, accepted: accepted)
                 library.receiveGroup(event, accepted: accepted, current: current)
@@ -376,13 +401,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             pendingCount: Set(library.data.completions.map(\.id) + Array(library.data.attention.keys) + library.data.reviewingIDs).count,
             chatNames: Dictionary(uniqueKeysWithValues: library.data.chats.keys.map { ($0, displayName(for: $0)) }))
         updateDashboard()
+        refreshStatistics()
         configureHeartbeat()
     }
 
     private func configureHeartbeat() {
         // Events wake us immediately. Timers only age state, service reminders and
         // renew the bounded idle-sleep lease; sleeping displays need no UI ticks.
-        let interval: TimeInterval = !displaySleeping && dashboard.isVisible ? 1
+        let interval: TimeInterval = !displaySleeping && (dashboard.isVisible || statisticsWindow.isVisible) ? 1
             : (!displaySleeping && model.snapshot().activeCount > 0 ? 5 : 30)
         if option("--preview") == nil { spoolWatcher?.start() }
         guard heartbeatInterval != interval else { return }
@@ -545,6 +571,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return privacy.name(for: sessionID, original: original, isSharing: library.data.screenSharing)
     }
 
+    private func statisticsSnapshot(_ period: TaskStatistics.Period) -> TaskStatistics.Snapshot {
+        var names = codexNames
+        for (id, name) in library.data.labels { names[id] = name }
+        return statistics.snapshot(period: period, names: names, tokens: tokenReport,
+            knownSessionIDs: Array(library.data.chats.keys), masked: library.data.screenSharing)
+    }
+
+    private func populateStatisticsPreview() {
+        let now = Date()
+        let first = "11111111-1111-4111-8111-111111111111"
+        let second = "22222222-2222-4222-8222-222222222222"
+        let third = "33333333-3333-4333-8333-333333333333"
+        codexNames = [first: "JP-1234 Кеш запросов", second: "JP-1234 Проверка конкурентности", third: "JP-1420 Миграция API"]
+        tokenReport = TaskTokenReader.Result(values: [first: 124800, second: 38200, third: 76500], status: .available,
+            detail: "Выдуманные значения для демонстрации интерфейса.")
+        for (index, id) in [first, second, third].enumerated() {
+            let start = now.addingTimeInterval(-3600 + Double(index) * 500)
+            let end = start.addingTimeInterval(Double(1200 + index * 240))
+            let turn = "demo-\(index)"
+            let chat = ChatSummary(id: id, turnID: turn, state: .working, startedAt: start, updatedAt: start)
+            statistics.observe(event: CompanionEvent(event: "UserPromptSubmit", sessionID: id, turnID: turn,
+                toolName: nil, toolUseID: nil, timestamp: start), accepted: true, current: chat)
+            statistics.observe(event: CompanionEvent(event: "Stop", sessionID: id, turnID: turn,
+                toolName: nil, toolUseID: nil, timestamp: end), accepted: true, current: chat)
+        }
+    }
+
+    private func showStatistics() {
+        dashboard.hide()
+        controller.dismissStateCard()
+        lastTokenRead = .distantPast
+        statisticsWindow.show()
+        refreshStatistics(force: true)
+    }
+
+    private func refreshStatistics(force: Bool = false) {
+        guard !displaySleeping, statisticsWindow.isVisible else { return }
+        if force || Date().timeIntervalSince(lastStatisticsRender) >= 5 {
+            lastStatisticsRender = Date()
+            if force { statisticsWindow.refresh() } else { statisticsWindow.refreshIfVisible() }
+        }
+        guard option("--preview") == nil, library.data.statisticsEnabled, !tokenReadInFlight,
+              force || Date().timeIntervalSince(lastTokenRead) >= 15 else { return }
+        tokenReadInFlight = true
+        lastTokenRead = Date()
+        let ids = Array(Set(Array(library.data.chats.keys) + statistics.sessionIDs).sorted().prefix(512))
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let report = TaskTokenReader().read(sessionIDs: ids)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.tokenReadInFlight = false
+                if self.library.data.statisticsEnabled { self.tokenReport = report }
+                self.statisticsWindow.refreshIfVisible()
+            }
+        }
+    }
+
     private func refreshContexts() {
         guard option("--preview") == nil, dashboard.isVisible, !displaySleeping,
               !contextReadInFlight, Date().timeIntervalSince(lastContextRead) >= 5 else { return }
@@ -567,7 +650,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard option("--preview") == nil, !displaySleeping, !nameReadInFlight else { return }
         let ids = Array(sessionIDs.prefix(512))
         let membership = ids.sorted()
-        let interval: TimeInterval = dashboard.isVisible ? 5 : 30
+        let interval: TimeInterval = dashboard.isVisible || statisticsWindow.isVisible ? 5 : 30
         guard membership != lastNameIDs || Date().timeIntervalSince(lastNameRead) >= interval else { return }
         lastNameIDs = membership
         lastNameRead = Date()

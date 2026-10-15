@@ -65,6 +65,9 @@ xcrun swiftc "${compiler_args[@]}" -framework CoreAudio Sources/AudioAccessory.s
 xcrun swiftc "${compiler_args[@]}" Sources/ResultSignal.swift Sources/TurnGroup.swift Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Sources/EventWake.swift Tests/EventWakeTests.swift -o .build/event-wake-tests
 ./.build/event-wake-tests
 
+xcrun swiftc "${compiler_args[@]}" -lsqlite3 Sources/ResultSignal.swift Sources/TurnGroup.swift Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Sources/ThreadNames.swift Sources/TaskStatistics.swift Tests/TaskStatisticsTests.swift -o .build/task-statistics-tests
+./.build/task-statistics-tests
+
 if [[ "${CODEX_NOTCH_TEST_NATIVE_POWER:-0}" == "1" ]]; then
   xcrun swiftc "${compiler_args[@]}" -framework IOKit Sources/ResultSignal.swift Sources/TurnGroup.swift Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Sources/KeepAwake.swift Tests/KeepAwakeNativeTests.swift -o .build/keep-awake-native-tests
   ./.build/keep-awake-native-tests --run-native-smoke
