@@ -113,8 +113,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var contexts: [String: ProjectContext] = [:]
     private var contextReadInFlight = false
     private var lastContextRead = Date.distantPast
+    private var groupSelection = Set<String>()
     private var lastPoll = Date.distantPast
     private var resumed = false
+    private var sessionActive = true
+    private var absenceCompletions: [CompletedTurn] = []
+    private var absenceExplicit: [LocalNotice] = []
+    private var absenceInterruptions: [LocalNotice] = []
     private var wakeObservers: [NSObjectProtocol] = []
     private var timer: Timer?
     private var demo = option("--demo").flatMap(CompanionState.init(rawValue:))
@@ -171,9 +176,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.demoHandler = { [weak self] state in self?.demo = state; self?.refresh() }
         controller.liveHandler = { [weak self] in self?.demo = nil; self?.refresh() }
         if option("--preview") == nil {
+            wakeObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.sessionActive = false }
+            })
             for name in [NSWorkspace.didWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
                 wakeObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.resumed = true }
+                    MainActor.assumeIsolated { self?.resumed = true; self?.sessionActive = true }
                 })
             }
         }
@@ -235,17 +243,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let accepted = event.event == "SessionEnd"
                     ? (previous.map { event.timestamp >= $0.updatedAt } ?? true)
                     : (current?.updatedAt == event.timestamp)
+                library.receiveGroup(event, accepted: accepted, current: current)
                 if accepted { library.rememberWorkingDirectory(event) }
                 if accepted, ["Stop", "Interrupt"].contains(event.event) { library.remember(model.chatSummaries()) }
                 library.clearAttentionForLifecycle(event, accepted: accepted)
                 if event.event == "SessionEnd", accepted { library.endSession(event.sessionID, at: event.timestamp) }
                 if let result = model.completion(for: event),
                    library.record(result, now: event.timestamp, deferNotification: library.quietExpired()) {
-                    if library.shouldNotify(result.sessionID, now: event.timestamp), library.data.attention[result.id] == nil {
+                    if library.shouldNotify(result.sessionID, now: event.timestamp), library.data.attention[result.id] == nil, !library.isGrouped(result.id) {
                         completionNotices.append(result)
                     }
                 }
                 if event.event == "Interrupt", library.shouldNotify(event.sessionID, now: event.timestamp),
+                   !library.isGrouped(event.sessionID + "|" + (current?.turnID ?? event.turnID ?? "")),
                    model.chatSummaries().contains(where: {
                        $0.id == event.sessionID && $0.state == .interrupted && $0.updatedAt == event.timestamp
                    }) {
@@ -257,13 +267,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let last = events.filter({ CompanionEvent.hookEvents.contains($0.event) }).map(\.timestamp).max() { library.recordLastEvent(last) }
             }
         }
-        let notices = NotificationPolicy.notices(completions: completionNotices, explicit: explicitNotices,
-            interruptions: interruptionNotices, codexForeground: NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.openai.codex",
-            catchingUp: catchingUp)
-        for notice in notices { controller.notify(title: notice.title, sessionID: notice.sessionID) }
-        for reminder in library.pollReminders(liveChats: model.chatSummaries()) {
-            controller.notify(title: reminder.kind == .result ? "Пора посмотреть результат" : "Ход всё ещё выполняется",
-                              sessionID: reminder.sessionID)
+        if !sessionActive {
+            absenceCompletions = Array((absenceCompletions + completionNotices).suffix(512))
+            absenceExplicit = Array((absenceExplicit + explicitNotices).suffix(512))
+            absenceInterruptions = Array((absenceInterruptions + interruptionNotices).suffix(512))
+            completionNotices.removeAll(); explicitNotices.removeAll(); interruptionNotices.removeAll()
+        } else {
+            catchingUp = catchingUp || !absenceCompletions.isEmpty || !absenceExplicit.isEmpty || !absenceInterruptions.isEmpty
+            completionNotices += absenceCompletions
+            explicitNotices += absenceExplicit
+            interruptionNotices += absenceInterruptions
+            absenceCompletions.removeAll(); absenceExplicit.removeAll(); absenceInterruptions.removeAll()
+            // A later clear/new turn in the same batch must revoke an obsolete popup.
+            explicitNotices = NotificationPolicy.pendingExplicit(explicitNotices, requests: library.data.attention)
+            for reminder in library.pollReminders(liveChats: model.chatSummaries()) {
+                explicitNotices.append(LocalNotice(title: reminder.kind == .result ? "Пора посмотреть результат" : "Ход всё ещё выполняется",
+                    sessionID: reminder.sessionID, key: reminder.targetKey))
+            }
+            if let text = library.pollGroupNotice() { explicitNotices.append(LocalNotice(title: text, key: "group")) }
+            let notices = NotificationPolicy.notices(completions: completionNotices, explicit: explicitNotices,
+                interruptions: interruptionNotices, codexForeground: NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.openai.codex",
+                catchingUp: catchingUp)
+            for notice in notices { controller.notify(title: notice.title, sessionID: notice.sessionID) }
         }
         if library.quietExpired() { finishQuiet() }
         controller.setQuiet(library.isQuiet())
@@ -289,6 +314,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 library.openChat(id)
                 dashboard.hide()
             }
+        case .toggleGroupSelection(let id):
+            if groupSelection.contains(id) { groupSelection.remove(id) } else { groupSelection.insert(id) }
+        case .startGroup:
+            library.startGroup(model.chatSummaries().filter { groupSelection.contains($0.id) })
+            groupSelection.removeAll()
+        case .cancelGroup: library.cancelGroup()
         case .openAttachment(let key):
             if let result = library.data.results[key], let path = result.path, let valid = ResultSignal.safePath(path) {
                 if NSWorkspace.shared.open(URL(fileURLWithPath: valid)) { library.markOpened(key); dashboard.hide() }
@@ -348,6 +379,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "Тишина ещё " + Self.duration($0.timeIntervalSinceNow)
         } ?? "Уведомления включены"
         dashboard.updateQuiet(status: quietText, active: library.isQuiet())
+        let selectable = Set(model.chatSummaries().filter { [.working, .coding, .checking].contains($0.state) }.map(\.id))
+        groupSelection.formIntersection(selectable)
+        dashboard.updateGroup(text: library.data.turnGroup?.text, selectedCount: groupSelection.count, hasGroup: library.data.turnGroup != nil)
         let live = Dictionary(uniqueKeysWithValues: model.chatSummaries().map { ($0.id, $0) })
         var all = library.data.chats
         for result in library.data.completions where all[result.sessionID] == nil {
@@ -393,6 +427,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 entry.canOpenResult = result.path != nil
                 entry.resultText = (result.id == currentKey ? "" : "Предыдущий ход · ") + result.checkText
             }
+            entry.isGroupSelected = groupSelection.contains(chat.id)
             entry.isReviewing = reviewing
             entry.contextText = contexts[chat.id]?.displayText ?? ""
             entry.contextPath = contexts[chat.id]?.workingDirectory ?? ""

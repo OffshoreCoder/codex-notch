@@ -21,6 +21,7 @@ struct DashboardEntry: Equatable {
     var resultText: String = ""
     var canOpenResult = false
     var isReviewing = false
+    var isGroupSelected = false
     var contextText: String = ""
     var contextPath: String = ""
     var status: DashboardStatus = .idle
@@ -29,6 +30,9 @@ struct DashboardEntry: Equatable {
 enum DashboardAction {
     case openChat(String)
     case openAttachment(String)
+    case toggleGroupSelection(String)
+    case startGroup
+    case cancelGroup
     case acknowledgeChat(String)
     case rename(String, String)
     case important(String?)
@@ -78,6 +82,10 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
     private let completedCount = NSTextField(labelWithString: "")
     private let focusStatus = NSTextField(labelWithString: "Все чаты могут уведомлять")
     private let quietButton = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let groupStatus = NSTextField(labelWithString: "Выбери ходы в меню ••• у чатов")
+    private let groupButton = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let startGroupItem = NSMenuItem(title: "Ждать выбранные ходы", action: nil, keyEquivalent: "")
+    private let cancelGroupItem = NSMenuItem(title: "Убрать ожидание", action: nil, keyEquivalent: "")
     private let quietStatus = NSTextField(labelWithString: "Уведомления включены")
     private let endQuietItem = NSMenuItem(title: "Выключить режим", action: nil, keyEquivalent: "")
     private let filterControl = NSSegmentedControl(labels: ["Все", "В работе", "Ждут тебя", "Готовы"],
@@ -173,11 +181,26 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
         quietStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let focusControls = NSStackView(views: [focusStatus, Self.spacer(), quietButton])
         focusControls.spacing = 10
-        let top = NSStackView(views: [heading, counts, search, filterControl, focusControls, quietStatus])
+        configureMetadata(groupStatus)
+        groupStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        groupButton.addItem(withTitle: "Ожидание…")
+        groupButton.controlSize = .small
+        groupButton.font = .systemFont(ofSize: 11)
+        groupButton.menu?.autoenablesItems = false
+        groupButton.menu?.delegate = self
+        startGroupItem.target = self
+        startGroupItem.action = #selector(startGroup)
+        cancelGroupItem.target = self
+        cancelGroupItem.action = #selector(cancelGroup)
+        groupButton.menu?.addItem(startGroupItem)
+        groupButton.menu?.addItem(cancelGroupItem)
+        let groupControls = NSStackView(views: [groupStatus, Self.spacer(), groupButton])
+        groupControls.spacing = 8
+        let top = NSStackView(views: [heading, counts, search, filterControl, focusControls, quietStatus, groupControls])
         top.orientation = .vertical
         top.alignment = .leading
-        top.spacing = 12
-        [heading, counts, search, filterControl, focusControls, quietStatus].forEach {
+        top.spacing = 10
+        [heading, counts, search, filterControl, focusControls, quietStatus, groupControls].forEach {
             $0.widthAnchor.constraint(equalTo: top.widthAnchor).isActive = true
         }
         let divider = NSBox()
@@ -247,6 +270,16 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
         if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
         if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
     }
+
+    func updateGroup(text: String?, selectedCount: Int, hasGroup: Bool) {
+        groupStatus.stringValue = text ?? (selectedCount > 0 ? "Выбрано ходов: \(selectedCount)" : "Выбери ходы в меню ••• у чатов")
+        groupStatus.toolTip = groupStatus.stringValue
+        startGroupItem.title = "Ждать выбранные ходы (\(selectedCount))"
+        startGroupItem.isEnabled = selectedCount > 0
+        cancelGroupItem.isEnabled = hasGroup
+    }
+    @objc private func startGroup() { handler(.startGroup) }
+    @objc private func cancelGroup() { handler(.cancelGroup) }
 
     func update(entries: [DashboardEntry]) {
         guard self.entries != entries else { return }
@@ -601,6 +634,7 @@ private final class DashboardRow: NSView, NSMenuDelegate {
     private let reminderLabel = NSTextField(labelWithString: "")
     private let acknowledge = NSButton(title: "Проверено", target: nil, action: nil)
     private let reminder = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let groupItem = NSMenuItem(title: "Добавить ход в ожидание группы", action: nil, keyEquivalent: "")
     private let importantItem = NSMenuItem(title: "Уведомлять об этом чате", action: nil, keyEquivalent: "")
     private var entry: DashboardEntry
     private let handler: (DashboardAction) -> Void
@@ -651,6 +685,9 @@ private final class DashboardRow: NSView, NSMenuDelegate {
         importantItem.target = self
         importantItem.action = #selector(toggleImportant)
         more.menu?.addItem(importantItem)
+        groupItem.target = self
+        groupItem.action = #selector(toggleGroupSelection)
+        more.menu?.addItem(groupItem)
         let open = DashboardOpenButton(title: "Открыть", target: self, action: #selector(openChat))
         open.font = .systemFont(ofSize: 11, weight: .semibold)
         acknowledge.target = self
@@ -732,6 +769,9 @@ private final class DashboardRow: NSView, NSMenuDelegate {
         acknowledge.isHidden = !pending
         acknowledge.isEnabled = pending
         importantItem.state = entry.isImportant ? .on : .off
+        groupItem.state = entry.isGroupSelected ? .on : .off
+        groupItem.isEnabled = entry.canWatchDuration
+        groupItem.title = entry.isGroupSelected ? "Убрать ход из выбора" : "Добавить ход в ожидание группы"
         reminderLabel.stringValue = entry.reminderText
         reminderLabel.toolTip = entry.reminderText
         reminderLabel.isHidden = entry.reminderText.isEmpty
@@ -755,6 +795,7 @@ private final class DashboardRow: NSView, NSMenuDelegate {
     @objc private func openAttachment() { if let key = entry.resultID { handler(.openAttachment(key)) } }
     @objc private func acknowledgeChat() { handler(.acknowledgeChat(entry.id)) }
     @objc private func renameChat() { handler(.rename(entry.id, entry.name)) }
+    @objc private func toggleGroupSelection() { handler(.toggleGroupSelection(entry.id)) }
     @objc private func toggleImportant() { handler(.important(entry.isImportant ? nil : entry.id)) }
     @objc private func remindCompleted(_ sender: NSMenuItem) { handler(.remindCompleted(entry.id, TimeInterval(sender.tag))) }
     @objc private func watchDuration(_ sender: NSMenuItem) { handler(.watchDuration(entry.id, TimeInterval(sender.tag))) }

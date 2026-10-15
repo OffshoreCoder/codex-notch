@@ -8,6 +8,14 @@ struct LocalNotice: Equatable {
 
 enum NotificationPolicy {
     static let longTurn: TimeInterval = 60
+    static func pendingExplicit(_ notices: [LocalNotice], requests: [String: AttentionRequest]) -> [LocalNotice] {
+        var seen = Set<String>()
+        return notices.filter { notice in
+            guard let request = requests[notice.key],
+                  notice.title == (request.kind == .question ? "Нужен твой ответ" : "Посмотри результат") else { return false }
+            return seen.insert(notice.key).inserted
+        }
+    }
     /// Quiet mode / selected-chat filtering happens before this pure policy.
     static func notices(completions: [CompletedTurn], explicit: [LocalNotice], interruptions: [LocalNotice],
                         codexForeground: Bool, catchingUp: Bool, now: Date = Date()) -> [LocalNotice] {

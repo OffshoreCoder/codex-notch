@@ -33,6 +33,7 @@ struct LocalData: Codable {
     var seenCompletions: [String] = []
     var chats: [String: ChatSummary] = [:]
     var labels: [String: String] = [:]
+    var turnGroup: TurnGroup? = nil
     var reviewingIDs: [String] = []
     var results: [String: TurnResult] = [:]
     var workingDirectories: [String: String] = [:]
@@ -49,13 +50,14 @@ struct LocalData: Codable {
     var deferredAttentionIDs: [String] = []
 
     init() {}
-    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, workingDirectories, results, reviewingIDs, lastRealEvent, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders, attention, seenAttention, deferredAttentionIDs }
+    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, workingDirectories, results, reviewingIDs, turnGroup, lastRealEvent, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders, attention, seenAttention, deferredAttentionIDs }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         completions = try c.decodeIfPresent([CompletedTurn].self, forKey: .completions) ?? []
         seenCompletions = try c.decodeIfPresent([String].self, forKey: .seenCompletions) ?? []
         chats = try c.decodeIfPresent([String: ChatSummary].self, forKey: .chats) ?? [:]
         labels = try c.decodeIfPresent([String: String].self, forKey: .labels) ?? [:]
+        turnGroup = try c.decodeIfPresent(TurnGroup.self, forKey: .turnGroup)
         reviewingIDs = try c.decodeIfPresent([String].self, forKey: .reviewingIDs) ?? []
         results = try c.decodeIfPresent([String: TurnResult].self, forKey: .results) ?? [:]
         workingDirectories = try c.decodeIfPresent([String: String].self, forKey: .workingDirectories) ?? [:]
@@ -112,6 +114,38 @@ final class LocalStore {
         return true
     }
 
+    func startGroup(_ chats: [ChatSummary]) {
+        var keys = Set<String>()
+        let turns = chats.compactMap { chat -> GroupTurn? in
+            guard [.working, .coding, .checking].contains(chat.state), let turn = chat.turnID else { return nil }
+            let item = GroupTurn(sessionID: chat.id, turnID: turn)
+            return keys.insert(item.id).inserted ? item : nil
+        }
+        guard !turns.isEmpty else { return }
+        update { $0.turnGroup = TurnGroup(turns: Array(turns.prefix(32))) }
+    }
+    func cancelGroup() { update { $0.turnGroup = nil } }
+    func isGrouped(_ key: String) -> Bool {
+        guard let group = data.turnGroup, !group.notified else { return false }
+        return group.turns.contains { $0.id == key }
+    }
+    func receiveGroup(_ event: CompanionEvent, accepted: Bool, current: ChatSummary?) {
+        guard var group = data.turnGroup else { return }
+        var scoped = event
+        if scoped.turnID == nil, ["Stop", "Interrupt"].contains(event.event), let turn = current?.turnID {
+            scoped = CompanionEvent(event: event.event, sessionID: event.sessionID, turnID: turn,
+                toolName: nil, toolUseID: nil, timestamp: event.timestamp)
+        }
+        group.receive(scoped, accepted: accepted)
+        guard group != data.turnGroup else { return }
+        update { $0.turnGroup = group }
+    }
+    func pollGroupNotice() -> String? {
+        guard let group = data.turnGroup, group.isComplete, !group.notified, !isQuiet(), !quietExpired() else { return nil }
+        update { $0.turnGroup?.notified = true }
+        return group.text
+    }
+
     @discardableResult func receiveResult(_ event: CompanionEvent, current: ChatSummary?) -> Bool {
         guard event.event == "Result", let result = event.result, let current,
               result.sessionID == event.sessionID, result.turnID == event.turnID,
@@ -162,8 +196,10 @@ final class LocalStore {
         let attentionKeys = data.attention.values.filter {
             data.deferredAttentionIDs.contains($0.id) && (data.importantSessionID == nil || data.importantSessionID == $0.sessionID)
         }.map(\.id)
-        let count = Set(completionKeys + reminderKeys + attentionKeys).count
+        let groupDue = data.turnGroup.map { $0.isComplete && !$0.notified } ?? false
+        let count = Set(completionKeys + reminderKeys + attentionKeys).count + (groupDue ? 1 : 0)
         update {
+            if groupDue { $0.turnGroup?.notified = true }
             $0.quietIndefinitely = false; $0.quietUntil = nil; $0.quietStartedAt = nil
             $0.deferredCompletionIDs.removeAll(); $0.deferredReminders.removeAll(); $0.deferredAttentionIDs.removeAll()
         }
