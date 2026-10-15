@@ -1,7 +1,7 @@
 import Foundation
 
 enum CompanionState: String, Codable {
-    case idle, working, coding, checking, finished, interrupted, unknown
+    case idle, working, coding, checking, finished, interrupted, unknown, needsAnswer, needsReview
 
     /// Only confirmed lifecycle outcomes may automatically interrupt the user.
     /// PermissionRequest precedes policy/auto-review and does not prove a dialog exists.
@@ -27,6 +27,7 @@ struct ChatSummary: Codable, Equatable {
     let state: CompanionState
     let startedAt: Date?
     let updatedAt: Date
+    var endedAt: Date? = nil
 }
 
 /// This is the complete on-disk event schema. No prompt, command, code or transcript.
@@ -38,14 +39,42 @@ struct CompanionEvent: Codable {
     let toolUseID: String?
     let timestamp: Date
 
-    static let supported: Set<String> = [
+    static let hookEvents: Set<String> = [
         "SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest",
         "PostToolUse", "Stop", "Interrupt", "SessionEnd"
     ]
 
+    static let attentionEvents: Set<String> = ["AttentionQuestion", "AttentionReview", "AttentionClear"]
+    static let supported = hookEvents.union(attentionEvents)
+
+    /// An explicit, exact no-op marker. Never inspect or retain arbitrary command content.
+    static func attentionFromHook(_ data: Data, now: Date = Date()) -> CompanionEvent? {
+        guard let base = fromHook(data, now: now), base.event == "PostToolUse", base.turnID != nil,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let input = object["tool_input"] as? [String: Any] else { return nil }
+        let command: String?
+        switch base.toolName {
+        case "Bash", "shell_command": command = input["command"] as? String
+        case "exec_command": command = input["cmd"] as? String
+        default: return nil
+        }
+        let names = [": codex-notch:question": "AttentionQuestion",
+                     ": codex-notch:review": "AttentionReview", ": codex-notch:clear": "AttentionClear"]
+        guard let command, let event = names[command] else { return nil }
+        return CompanionEvent(event: event, sessionID: base.sessionID, turnID: base.turnID,
+                              toolName: nil, toolUseID: nil, timestamp: now)
+    }
+
+    static func explicitAttention(kind: String, session: String, turn: String, now: Date = Date()) -> CompanionEvent? {
+        let names = ["question": "AttentionQuestion", "review": "AttentionReview", "clear": "AttentionClear"]
+        guard let name = names[kind], UUID(uuidString: session) != nil, let validTurn = identifier(turn) else { return nil }
+        return CompanionEvent(event: name, sessionID: session.lowercased(), turnID: validTurn,
+                              toolName: nil, toolUseID: nil, timestamp: now)
+    }
+
     static func fromHook(_ data: Data, now: Date = Date()) -> CompanionEvent? {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let event = object["hook_event_name"] as? String, supported.contains(event),
+              let event = object["hook_event_name"] as? String, hookEvents.contains(event),
               let session = identifier(object["session_id"]) else { return nil }
         return CompanionEvent(event: event, sessionID: session,
                               turnID: identifier(object["turn_id"]),
@@ -69,6 +98,7 @@ struct CompanionModel {
         var rootTurn: String?
         var turnKey: String?
         var startedAt: Date?
+        var endedAt: Date?
         var terminal = false
         var tools: [String: String] = [:]
         var requests: Set<String> = []
@@ -79,10 +109,10 @@ struct CompanionModel {
     static let staleAfter: TimeInterval = 30 * 60
 
     mutating func receive(_ event: CompanionEvent) {
-        guard CompanionEvent.supported.contains(event.event) else { return }
-        if event.event == "SessionEnd" { sessions.removeValue(forKey: event.sessionID); return }
+        guard CompanionEvent.hookEvents.contains(event.event) else { return }
         var session = sessions[event.sessionID] ?? Session()
         guard event.timestamp >= session.lastEvent else { return }
+        if event.event == "SessionEnd" { sessions.removeValue(forKey: event.sessionID); return }
         // A tool finishing in a child after root Stop must not resurrect the chat.
         if session.terminal && ["PreToolUse", "PostToolUse", "PermissionRequest"].contains(event.event) {
             return
@@ -95,6 +125,7 @@ struct CompanionModel {
             session.rootTurn = event.turnID
             session.turnKey = event.turnID ?? "local-\(event.timestamp.timeIntervalSince1970)"
             session.startedAt = event.timestamp
+            session.endedAt = nil
             session.terminal = false
             session.tools.removeAll()
             session.requests.removeAll()
@@ -123,6 +154,11 @@ struct CompanionModel {
         case "Stop", "Interrupt":
             // Ignore an explicitly different turn when the root turn is known.
             if let root = session.rootTurn, let turn = event.turnID, root != turn { return }
+            if !session.terminal {
+                session.rootTurn = session.rootTurn ?? event.turnID
+                session.turnKey = event.turnID ?? session.turnKey ?? "stop-\(event.timestamp.timeIntervalSince1970)"
+                session.endedAt = event.timestamp
+            }
             session.state = event.event == "Stop" ? .finished : .interrupted
             session.terminal = true
             session.tools.removeAll()
@@ -161,8 +197,8 @@ struct CompanionModel {
     func chatSummaries(now: Date = Date()) -> [ChatSummary] {
         sessions.map { id, session in
             ChatSummary(id: id, turnID: session.turnKey,
-                        state: now.timeIntervalSince(session.lastEvent) < Self.staleAfter ? session.state : .unknown,
-                        startedAt: session.startedAt, updatedAt: session.lastEvent)
+                        state: [.working, .coding, .checking].contains(session.state) && now.timeIntervalSince(session.lastEvent) >= Self.staleAfter ? .unknown : session.state,
+                        startedAt: session.startedAt, updatedAt: session.lastEvent, endedAt: session.endedAt)
         }.sorted { $0.updatedAt > $1.updatedAt }
     }
 
@@ -171,7 +207,7 @@ struct CompanionModel {
               session.state == .finished, session.lastEvent == event.timestamp else { return nil }
         return CompletedTurn(sessionID: event.sessionID,
                              turnID: session.turnKey ?? event.turnID ?? "stop-\(event.timestamp.timeIntervalSince1970)",
-                             startedAt: session.startedAt, finishedAt: event.timestamp)
+                             startedAt: session.startedAt, finishedAt: session.endedAt ?? event.timestamp)
     }
 
     private func runningState(_ session: Session) -> CompanionState {
@@ -187,6 +223,7 @@ struct CompanionModel {
     }
     private func priority(_ state: CompanionState) -> Int {
         switch state {
+        case .needsAnswer, .needsReview: return 7
         case .checking: return 6
         case .coding: return 5
         case .working: return 4

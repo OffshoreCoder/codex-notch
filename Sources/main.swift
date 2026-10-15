@@ -14,7 +14,9 @@ if arguments.contains("--hook") {
             if input.count > 16 * 1024 * 1024 { break }
         }
         if input.count <= 16 * 1024 * 1024, let event = CompanionEvent.fromHook(input) {
-            try EventSpool(directory: EventSpool.defaultDirectory).append(event)
+            let spool = EventSpool(directory: EventSpool.defaultDirectory)
+            try spool.append(event)
+            if let attention = CompanionEvent.attentionFromHook(input, now: event.timestamp) { try spool.append(attention) }
         }
     } catch {
         // An absent/unwritable companion must never block the user's agent.
@@ -26,6 +28,18 @@ if arguments.contains("--hook") {
 func option(_ name: String) -> String? {
     guard let index = arguments.firstIndex(of: name), index + 1 < arguments.count else { return nil }
     return arguments[index + 1]
+}
+
+if arguments.contains("--attention") {
+    guard arguments.count == 6, Set(stride(from: 0, to: 6, by: 2).map { arguments[$0] }) == Set(["--attention", "--session", "--turn"]),
+          let kind = option("--attention"), let session = option("--session"), let turn = option("--turn"),
+          let event = CompanionEvent.explicitAttention(kind: kind, session: session, turn: turn) else {
+        fputs("Нужны --attention question|review|clear --session UUID --turn TURN_ID\n", stderr); exit(2)
+    }
+    do { try EventSpool(directory: EventSpool.defaultDirectory).append(event) }
+    catch { fputs("Не удалось отправить сигнал: \(error.localizedDescription)\n", stderr); exit(1) }
+    print("Сигнал отправлен. Он применяется только к совпадающему известному ходу.")
+    exit(0)
 }
 
 if arguments.contains("--connect-hooks") || arguments.contains("--disconnect-hooks") || arguments.contains("--print-hooks") {
@@ -63,6 +77,8 @@ if arguments.contains("--health") {
 if arguments.contains("--help") {
     print("""
     CodexNotch — локальный персонаж у выреза Mac.
+      --attention KIND --session UUID --turn ID  явный question/review/clear
+      --preview-dashboard    вместе с --preview отрисовать демонстрацию пульта
       --health [--self-test] проверить настройки/путь и локальную запись без AppKit
       --demo STATE           idle/working/coding/checking/finished/interrupted/unknown
       --preview PATH         сохранить изображение собственного окна и завершить
@@ -85,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var library: LocalStore!
     private var dashboard: DashboardController!
     private var health: HealthController!
+    private var previewDirectory: URL?
     private var timer: Timer?
     private var demo = option("--demo").flatMap(CompanionState.init(rawValue:))
     private let spool = EventSpool(directory: EventSpool.defaultDirectory)
@@ -95,8 +112,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApplication.shared.terminate(nil)
             return
         }
-        library = LocalStore(directory: option("--preview") == nil ? spool.directory :
-            FileManager.default.temporaryDirectory.appendingPathComponent("CodexNotch-preview-" + UUID().uuidString))
+        if option("--preview") != nil {
+            previewDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("CodexNotch-preview-" + UUID().uuidString)
+        }
+        library = LocalStore(directory: previewDirectory ?? spool.directory)
         controller = NotchController()
         dashboard = DashboardController(handler: { [weak self] action in self?.handle(action) })
         health = HealthController(reportProvider: { [weak self] selfTest in
@@ -124,7 +143,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if let path = option("--preview") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                if arguments.contains("--compact-preview") {
+                if arguments.contains("--preview-dashboard") {
+                    self?.populatePreview()
+                    self?.dashboard.show()
+                    self?.dashboard.capturePreview(to: URL(fileURLWithPath: path))
+                } else if arguments.contains("--compact-preview") {
                     self?.controller.captureCompactPreview(to: URL(fileURLWithPath: path))
                 } else {
                     self?.controller.capturePreview(to: URL(fileURLWithPath: path))
@@ -139,15 +162,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        if let previewDirectory { try? FileManager.default.removeItem(at: previewDirectory) }
+    }
+
     private func refresh() {
         // Replay queued events before the single end-of-quiet summary, including after restart.
         controller.setQuiet(library.isQuiet() || library.quietExpired())
         if option("--preview") == nil {
             let events = spool.drain()
             for event in events {
+                let previous = model.chatSummaries().first { $0.id == event.sessionID } ?? library.data.chats[event.sessionID]
                 model.receive(event)
-                if let result = model.completion(for: event), library.record(result, now: event.timestamp) {
-                    if library.shouldNotify(result.sessionID, now: event.timestamp) {
+                let current = model.chatSummaries().first { $0.id == event.sessionID } ?? library.data.chats[event.sessionID]
+                if library.receiveAttention(event, current: current, deferNotification: library.quietExpired()),
+                   library.shouldNotify(event.sessionID, now: event.timestamp) {
+                    controller.notify(title: event.event == "AttentionQuestion" ? "Нужен твой ответ" : "Посмотри результат",
+                                      sessionID: event.sessionID)
+                }
+                let accepted = event.event == "SessionEnd"
+                    ? (previous.map { event.timestamp >= $0.updatedAt } ?? true)
+                    : (current?.updatedAt == event.timestamp)
+                if accepted, ["Stop", "Interrupt"].contains(event.event) { library.remember(model.chatSummaries()) }
+                library.clearAttentionForLifecycle(event, accepted: accepted)
+                if event.event == "SessionEnd", accepted { library.endSession(event.sessionID, at: event.timestamp) }
+                if let result = model.completion(for: event),
+                   library.record(result, now: event.timestamp, deferNotification: library.quietExpired()) {
+                    if library.shouldNotify(result.sessionID, now: event.timestamp), library.data.attention[result.id] == nil {
                         controller.notify(title: "Ход завершён", sessionID: result.sessionID)
                     }
                 }
@@ -160,7 +201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             if !events.isEmpty {
                 library.remember(model.chatSummaries())
-                if let last = events.map(\.timestamp).max() { library.recordLastEvent(last) }
+                if let last = events.filter({ CompanionEvent.hookEvents.contains($0.event) }).map(\.timestamp).max() { library.recordLastEvent(last) }
             }
         }
         for reminder in library.pollReminders(liveChats: model.chatSummaries()) {
@@ -170,11 +211,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if library.quietExpired() { finishQuiet() }
         controller.setQuiet(library.isQuiet())
         let live = model.snapshot()
+        let attention = library.data.attention.values.sorted { $0.requestedAt > $1.requestedAt }.first
+        let attentionSnapshot = attention.map {
+            CompanionSnapshot(state: $0.state, sessionID: $0.sessionID, activeCount: live.activeCount, updatedAt: $0.requestedAt)
+        }
         let snapshot = demo.map {
             CompanionSnapshot(state: $0, sessionID: nil, activeCount: [.working, .coding, .checking].contains($0) ? 1 : 0, updatedAt: Date())
-        } ?? live
+        } ?? attentionSnapshot ?? live
         controller.update(snapshot)
-        controller.updateQueue(library.data.completions, error: library.error)
+        controller.updateQueue(library.data.completions, error: library.error,
+            pendingCount: Set(library.data.completions.map(\.id) + Array(library.data.attention.keys)).count)
         updateDashboard()
     }
 
@@ -191,6 +237,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .watchDuration(let id, let seconds):
             if let chat = model.chatSummaries().first(where: { $0.id == id }) { library.watchDuration(chat, threshold: seconds) }
         case .cancelReminders(let id): library.cancelReminders(id)
+        case .copyAttentionInstruction:
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(Self.attentionInstruction, forType: .string)
+            let alert = NSAlert()
+            alert.messageText = "Инструкция скопирована"
+            alert.informativeText = "Вставь её в нужный чат Codex. Сигналы появятся, когда агент выполнит точный маркер через shell. Проверки разрешений не используются."
+            alert.addButton(withTitle: "Понятно")
+            alert.runModal()
         }
         refresh()
     }
@@ -221,11 +275,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let state = live[saved.id] == nil && [.working, .coding, .checking].contains(saved.state)
                 ? CompanionState.unknown : chat.state
             let duration = chat.startedAt.map {
-                (state == .finished || state == .interrupted ? chat.updatedAt : Date()).timeIntervalSince($0)
+                (state == .finished || state == .interrupted ? chat.endedAt ?? chat.updatedAt : Date()).timeIntervalSince($0)
             }
             let elapsed = duration.map { "Ход: " + Self.duration($0) } ?? ""
+            let request = library.data.attention.values.first { $0.sessionID == chat.id }
+            let deferred = library.data.deferredReminders.filter { $0.sessionID == chat.id }
             return DashboardEntry(id: chat.id, name: library.name(for: chat.id),
-                stateText: state == .finished ? "Ход завершён" : state.companionTitle,
+                stateText: request?.state.companionTitle ?? (state == .finished ? "Ход завершён" : state.companionTitle),
                 elapsedText: state == .unknown ? "Последнее известное состояние" : elapsed,
                 updatedText: "Последний сигнал: " + Self.duration(Date().timeIntervalSince(chat.updatedAt)) + " назад",
                 unreadCount: library.data.completions.filter { $0.sessionID == chat.id }.count,
@@ -235,9 +291,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 reminderText: library.data.reminders.filter { $0.sessionID == chat.id }.map {
                     ($0.kind == .result ? "Вернуться через " : "Проверить длительность через ") +
                         Self.duration($0.dueAt.timeIntervalSinceNow)
-                }.joined(separator: " · "))
+                }.joined(separator: " · ") + (deferred.isEmpty ? "" : " · Напоминание ожидает окончания тишины"),
+                attentionText: request == nil ? "" : "Требует внимания")
         }
         dashboard.update(entries: entries)
+    }
+
+    private static let attentionInstruction = """
+    Подключи в этом чате явные сигналы Codex Notch. Непосредственно перед настоящим вопросом ко мне выполни отдельной shell-командой точно:
+    : codex-notch:question
+    Перед просьбой посмотреть или проверить готовый результат:
+    : codex-notch:review
+    Если просьба больше не актуальна:
+    : codex-notch:clear
+    Это no-op маркеры для локального hook PostToolUse. Используй прямой shell tool, без обёртки JavaScript, echo, дополнительных команд и перенаправлений. Не отправляй question для проверки разрешения, обычной работы или простого завершения хода. Не отправляй marker заранее. Если shell недоступен, просто продолжай общение; не утверждай, что сигнал был отправлен.
+    """
+
+    private func populatePreview() {
+        let entries = [
+            DashboardEntry(id: "demo-a", name: "Review библиотеки", stateText: "Посмотри результат", elapsedText: "Ход: 7 мин", updatedText: "Последний сигнал: 12 с назад", unreadCount: 1, isImportant: true, canRemindResult: true, attentionText: "Требует внимания"),
+            DashboardEntry(id: "demo-b", name: "Исправление сборки", stateText: "Пишет код", elapsedText: "Ход: 3 мин", updatedText: "Последний сигнал: 2 с назад", unreadCount: 0, canWatchDuration: true, reminderText: "Проверить длительность через 7 мин"),
+            DashboardEntry(id: "demo-c", name: "Проверка тестов", stateText: "Ход завершён", elapsedText: "Ход: 42 с", updatedText: "Последний сигнал: 2 мин назад", unreadCount: 2, canRemindResult: true)
+        ]
+        dashboard.update(entries: entries)
+        dashboard.updateQuiet(status: "Тишина ещё 18 мин", active: true)
     }
 
     private static func duration(_ seconds: TimeInterval) -> String {

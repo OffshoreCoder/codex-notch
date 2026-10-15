@@ -113,12 +113,13 @@ final class NotchController: NSObject, NSMenuDelegate {
         statusItem.button?.toolTip = "Codex · \(snapshot.state.companionTitle) · локально"
     }
 
-    func updateQueue(_ completions: [CompletedTurn], error: String?) {
+    func updateQueue(_ completions: [CompletedTurn], error: String?, pendingCount: Int? = nil) {
         self.completions = completions
         queueError = error
-        companionView.unreadCount = completions.count
-        statusItem.button?.title = completions.isEmpty ? "" : " \(min(completions.count, 99))"
-        statusItem.length = completions.isEmpty ? NSStatusItem.squareLength : NSStatusItem.variableLength
+        let count = pendingCount ?? completions.count
+        companionView.unreadCount = count
+        statusItem.button?.title = count == 0 ? "" : " \(min(count, 99))"
+        statusItem.length = count == 0 ? NSStatusItem.squareLength : NSStatusItem.variableLength
         companionView.needsDisplay = true
     }
 
@@ -339,7 +340,7 @@ final class NotchController: NSObject, NSMenuDelegate {
         menu.addItem(screenItem)
 
         let demos = NSMenu()
-        let states: [CompanionState] = [.idle, .working, .coding, .checking, .finished, .interrupted, .unknown]
+        let states: [CompanionState] = [.idle, .working, .coding, .checking, .finished, .interrupted, .unknown, .needsAnswer, .needsReview]
         for state in states {
             let demo = item(state.companionTitle, action: #selector(selectDemo(_:)))
             demo.representedObject = state.rawValue
@@ -713,7 +714,9 @@ extension CompanionState {
         case .working: return "Разбирается в задаче"
         case .coding: return "Пишет код"
         case .checking: return "Проверка действия"
-        case .finished: return "Готово"
+        case .needsAnswer: return "Нужен твой ответ"
+        case .needsReview: return "Посмотри результат"
+        case .finished: return "Ход завершён"
         case .interrupted: return "Остановлен"
         case .unknown: return "Нет свежих событий"
         }
@@ -725,6 +728,7 @@ extension CompanionState {
         case .working: return "Думает, читает и проверяет"
         case .coding: return "Шуршит маленькой клавиатурой"
         case .checking: return "Codex проверяет действие"
+        case .needsAnswer, .needsReview: return "Явный сигнал из чата"
         case .finished: return "Результат ждёт в чате"
         case .interrupted: return "Можно продолжить в чате"
         case .unknown: return "Ожидает локальный сигнал"
@@ -737,6 +741,7 @@ extension CompanionState {
         case .working: return NSColor(calibratedRed: 0.60, green: 0.77, blue: 1, alpha: 1)
         case .coding: return NSColor(calibratedRed: 0.64, green: 0.96, blue: 0.80, alpha: 1)
         case .checking: return NSColor(calibratedRed: 1, green: 0.75, blue: 0.38, alpha: 1)
+        case .needsAnswer, .needsReview: return NSColor(calibratedRed: 1, green: 0.75, blue: 0.38, alpha: 1)
         case .finished: return NSColor(calibratedRed: 0.64, green: 0.96, blue: 0.80, alpha: 1)
         case .interrupted: return NSColor(calibratedRed: 0.90, green: 0.64, blue: 0.58, alpha: 1)
         case .unknown: return NSColor(calibratedRed: 0.65, green: 0.67, blue: 0.72, alpha: 1)

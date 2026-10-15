@@ -12,6 +12,7 @@ struct DashboardEntry: Equatable {
     var canRemindResult: Bool = false
     var canWatchDuration: Bool = false
     var reminderText: String = ""
+    var attentionText: String = ""
 }
 
 enum DashboardAction {
@@ -24,6 +25,7 @@ enum DashboardAction {
     case remindCompleted(String, TimeInterval)
     case watchDuration(String, TimeInterval)
     case cancelReminders(String)
+    case copyAttentionInstruction
 }
 
 /// Explicitly opened, keyboard-accessible window. The notch itself remains passive.
@@ -31,7 +33,7 @@ enum DashboardAction {
 final class DashboardController: NSObject {
     private let window: NSWindow
     private let rows = NSStackView()
-    private let summary = NSTextField(labelWithString: "")
+    private let summary = NSTextField(wrappingLabelWithString: "")
     private let quietButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private let quietStatus = NSTextField(labelWithString: "Уведомления включены")
     private let endQuietItem = NSMenuItem(title: "Выключить режим", action: nil, keyEquivalent: "")
@@ -52,14 +54,22 @@ final class DashboardController: NSObject {
         window.isReleasedWhenClosed = false
         window.center()
 
-        let root = NSView()
+        let root = DashboardRootView()
         window.contentView = root
         let title = NSTextField(labelWithString: "Чаты Codex")
         title.font = .systemFont(ofSize: 20, weight: .semibold)
+        let attentionInstruction = NSButton(title: "Включить сигналы в чате…", target: self,
+                                            action: #selector(copyAttentionInstruction))
+        attentionInstruction.bezelStyle = .rounded
+        attentionInstruction.controlSize = .small
+        attentionInstruction.font = .systemFont(ofSize: 11)
+        attentionInstruction.toolTip = "Скопировать инструкцию для выбранного чата. Сигнал появится только после явной команды из инструкции; проверка разрешений сама по себе его не включает."
         summary.font = .systemFont(ofSize: 12)
         summary.textColor = .secondaryLabelColor
         summary.lineBreakMode = .byWordWrapping
         summary.maximumNumberOfLines = 3
+        summary.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        summary.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         quietButton.controlSize = .small
         quietButton.font = .systemFont(ofSize: 12)
@@ -97,7 +107,7 @@ final class DashboardController: NSObject {
         rows.spacing = 10
         document.addSubview(rows)
         scroll.documentView = document
-        [title, summary, quietControls, scroll].forEach {
+        [title, attentionInstruction, summary, quietControls, scroll].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview($0)
         }
@@ -106,6 +116,9 @@ final class DashboardController: NSObject {
         NSLayoutConstraint.activate([
             title.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
             title.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: attentionInstruction.leadingAnchor, constant: -12),
+            attentionInstruction.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
+            attentionInstruction.centerYAnchor.constraint(equalTo: title.centerYAnchor),
             summary.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 6),
             summary.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             summary.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
@@ -166,6 +179,7 @@ final class DashboardController: NSObject {
     }
 
     @objc private func endQuiet() { handler(.endQuiet) }
+    @objc private func copyAttentionInstruction() { handler(.copyAttentionInstruction) }
 
     private func renderEntries() {
         let unread = entries.reduce(0) { $0 + max(0, $1.unreadCount) }
@@ -233,6 +247,14 @@ final class DashboardController: NSObject {
     }
 }
 
+private final class DashboardRootView: NSView {
+    override var isOpaque: Bool { true }
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.windowBackgroundColor.setFill()
+        dirtyRect.fill()
+    }
+}
+
 private final class DashboardDocumentView: NSView {
     override var isFlipped: Bool { true }
 }
@@ -276,6 +298,8 @@ private final class DashboardRow: NSView {
         updated.lineBreakMode = .byTruncatingTail
         importantLabel.font = .systemFont(ofSize: 11, weight: .medium)
         importantLabel.textColor = .controlAccentColor
+        importantLabel.lineBreakMode = .byTruncatingTail
+        importantLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         important.font = .systemFont(ofSize: 11)
         important.target = self
         important.action = #selector(toggleImportant)
@@ -346,11 +370,13 @@ private final class DashboardRow: NSView {
         self.entry = entry
         name.stringValue = entry.name
         name.toolTip = entry.name
-        unread.stringValue = entry.unreadCount > 0 ? "Новых: \(entry.unreadCount)" : ""
+        let resultText = entry.unreadCount > 0 ? "Новых: \(entry.unreadCount)" : ""
+        unread.stringValue = [entry.attentionText, resultText].filter { !$0.isEmpty }.joined(separator: " · ")
+        unread.toolTip = unread.stringValue
         state.stringValue = entry.stateText
         elapsed.stringValue = entry.elapsedText
         updated.stringValue = entry.updatedText
-        acknowledge.isEnabled = entry.unreadCount > 0
+        acknowledge.isEnabled = entry.unreadCount > 0 || !entry.attentionText.isEmpty
         important.state = entry.isImportant ? .on : .off
         importantLabel.stringValue = entry.isImportant ? "Выбран для уведомлений" : ""
         reminderLabel.stringValue = entry.reminderText

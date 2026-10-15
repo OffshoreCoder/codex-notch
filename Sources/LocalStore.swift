@@ -18,6 +18,16 @@ struct LocalReminder: Codable, Equatable, Identifiable {
     var targetKey: String { sessionID + "|" + turnID }
 }
 
+enum AttentionKind: String, Codable { case question, review }
+struct AttentionRequest: Codable, Equatable, Identifiable {
+    let sessionID: String
+    let turnID: String
+    let kind: AttentionKind
+    let requestedAt: Date
+    var id: String { sessionID + "|" + turnID }
+    var state: CompanionState { kind == .question ? .needsAnswer : .needsReview }
+}
+
 struct LocalData: Codable {
     var completions: [CompletedTurn] = []
     var seenCompletions: [String] = []
@@ -31,9 +41,12 @@ struct LocalData: Codable {
     var deferredCompletionIDs: [String] = []
     var reminders: [LocalReminder] = []
     var deferredReminders: [LocalReminder] = []
+    var attention: [String: AttentionRequest] = [:]
+    var seenAttention: [String] = []
+    var deferredAttentionIDs: [String] = []
 
     init() {}
-    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, lastRealEvent, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders }
+    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, lastRealEvent, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders, attention, seenAttention, deferredAttentionIDs }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         completions = try c.decodeIfPresent([CompletedTurn].self, forKey: .completions) ?? []
@@ -48,6 +61,9 @@ struct LocalData: Codable {
         deferredCompletionIDs = try c.decodeIfPresent([String].self, forKey: .deferredCompletionIDs) ?? []
         reminders = try c.decodeIfPresent([LocalReminder].self, forKey: .reminders) ?? []
         deferredReminders = try c.decodeIfPresent([LocalReminder].self, forKey: .deferredReminders) ?? []
+        attention = try c.decodeIfPresent([String: AttentionRequest].self, forKey: .attention) ?? [:]
+        seenAttention = try c.decodeIfPresent([String].self, forKey: .seenAttention) ?? []
+        deferredAttentionIDs = try c.decodeIfPresent([String].self, forKey: .deferredAttentionIDs) ?? []
     }
 }
 
@@ -66,7 +82,7 @@ final class LocalStore {
             if FileManager.default.fileExists(atPath: url.path) {
                 let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
                 guard attrs[.type] as? FileAttributeType == .typeRegular,
-                      (attrs[.size] as? NSNumber)?.intValue ?? Int.max <= 4 * 1024 * 1024 else {
+                      (attrs[.size] as? NSNumber)?.intValue ?? Int.max <= 16 * 1024 * 1024 else {
                     throw CocoaError(.fileReadNoPermission)
                 }
                 data = try JSONDecoder().decode(LocalData.self, from: Data(contentsOf: url))
@@ -77,9 +93,9 @@ final class LocalStore {
         }
     }
 
-    @discardableResult func record(_ completion: CompletedTurn, now: Date = Date()) -> Bool {
+    @discardableResult func record(_ completion: CompletedTurn, now: Date = Date(), deferNotification: Bool = false) -> Bool {
         guard !data.seenCompletions.contains(completion.id) else { return false }
-        let quiet = isQuiet(now: now)
+        let quiet = isQuiet(now: now) || deferNotification
         update {
             if quiet { $0.deferredCompletionIDs = Array(($0.deferredCompletionIDs + [completion.id]).suffix(512)) }
             $0.completions.append(completion)
@@ -112,10 +128,13 @@ final class LocalStore {
             return data.chats[reminder.sessionID]?.turnID == reminder.turnID &&
                 [.working, .coding, .checking].contains(data.chats[reminder.sessionID]?.state ?? .unknown)
         }.map(\.targetKey)
-        let count = Set(completionKeys + reminderKeys).count
+        let attentionKeys = data.attention.values.filter {
+            data.deferredAttentionIDs.contains($0.id) && (data.importantSessionID == nil || data.importantSessionID == $0.sessionID)
+        }.map(\.id)
+        let count = Set(completionKeys + reminderKeys + attentionKeys).count
         update {
             $0.quietIndefinitely = false; $0.quietUntil = nil; $0.quietStartedAt = nil
-            $0.deferredCompletionIDs.removeAll(); $0.deferredReminders.removeAll()
+            $0.deferredCompletionIDs.removeAll(); $0.deferredReminders.removeAll(); $0.deferredAttentionIDs.removeAll()
         }
         return count
     }
@@ -137,6 +156,7 @@ final class LocalStore {
     private func schedule(_ reminder: LocalReminder) {
         update {
             $0.reminders.removeAll { $0.sessionID == reminder.sessionID && $0.kind == reminder.kind }
+            $0.deferredReminders.removeAll { $0.sessionID == reminder.sessionID && $0.kind == reminder.kind }
             $0.reminders.append(reminder)
             $0.reminders = Array($0.reminders.suffix(512))
         }
@@ -156,6 +176,8 @@ final class LocalStore {
                 guard data.completions.contains(where: { $0.id == reminder.targetKey }) else { continue }
             } else {
                 guard let chat = liveChats.first(where: { $0.id == reminder.sessionID }) else {
+                    if let known = data.chats[reminder.sessionID],
+                       known.turnID != reminder.turnID || [.idle, .finished, .interrupted].contains(known.state) { continue }
                     keep.append(reminder); continue
                 }
                 guard chat.turnID == reminder.turnID,
@@ -171,6 +193,60 @@ final class LocalStore {
             if quiet { $0.deferredReminders = Array(($0.deferredReminders + due).suffix(512)) }
         }
         return quiet ? [] : due
+    }
+
+    /// Only a scoped explicit signal can create attention; Stop and tool results preserve it.
+    @discardableResult func receiveAttention(_ event: CompanionEvent, current: ChatSummary?, deferNotification: Bool = false) -> Bool {
+        guard CompanionEvent.attentionEvents.contains(event.event), let turn = event.turnID,
+              let current, current.id == event.sessionID, current.turnID == turn,
+              event.timestamp >= current.updatedAt,
+              ![.idle, .interrupted].contains(current.state) || event.event == "AttentionClear" else { return false }
+        if event.event == "AttentionClear" {
+            update { $0.attention.removeValue(forKey: event.sessionID + "|" + turn) }
+            return false
+        }
+        let kind: AttentionKind = event.event == "AttentionQuestion" ? .question : .review
+        let request = AttentionRequest(sessionID: event.sessionID, turnID: turn, kind: kind, requestedAt: event.timestamp)
+        let key = request.id + "|" + kind.rawValue
+        guard !data.seenAttention.contains(key) else { return false }
+        let quiet = isQuiet(now: event.timestamp) || deferNotification
+        update {
+            $0.attention = $0.attention.filter { $0.value.sessionID != event.sessionID }
+            $0.attention[request.id] = request
+            if $0.attention.count > 512 {
+                $0.attention = Dictionary(uniqueKeysWithValues: $0.attention.values.sorted { $0.requestedAt > $1.requestedAt }
+                    .prefix(512).map { ($0.id, $0) })
+            }
+            $0.seenAttention = Array(($0.seenAttention + [key]).suffix(4096))
+            if quiet { $0.deferredAttentionIDs = Array(($0.deferredAttentionIDs + [request.id]).suffix(512)) }
+        }
+        return true
+    }
+
+    func clearAttention(sessionID: String) {
+        update { $0.attention = $0.attention.filter { $0.value.sessionID != sessionID } }
+    }
+
+    func clearAttentionForLifecycle(_ event: CompanionEvent, accepted: Bool) {
+        guard accepted, ["UserPromptSubmit", "Interrupt", "SessionEnd"].contains(event.event) else { return }
+        update { data in
+            data.attention = data.attention.filter {
+                guard $0.value.sessionID == event.sessionID else { return true }
+                return event.event != "UserPromptSubmit" && event.turnID != nil && event.turnID != $0.value.turnID
+            }
+        }
+    }
+
+    func endSession(_ sessionID: String, at date: Date) {
+        update { data in
+            data.reminders.removeAll { $0.sessionID == sessionID && $0.kind == .duration }
+            data.deferredReminders.removeAll { $0.sessionID == sessionID && $0.kind == .duration }
+            if let chat = data.chats[sessionID] {
+                let terminal = [CompanionState.finished, .interrupted].contains(chat.state)
+                data.chats[sessionID] = ChatSummary(id: sessionID, turnID: nil, state: terminal ? chat.state : .idle,
+                    startedAt: terminal ? chat.startedAt : nil, updatedAt: date, endedAt: chat.endedAt)
+            }
+        }
     }
 
     func recordLastEvent(_ date: Date) {
@@ -194,10 +270,15 @@ final class LocalStore {
         update { $0.labels[sessionID] = label.isEmpty ? nil : label }
     }
     func name(for sessionID: String) -> String { data.labels[sessionID] ?? "Чат " + String(sessionID.prefix(8)) }
-    func acknowledgeChat(_ sessionID: String) { update { $0.completions.removeAll { $0.sessionID == sessionID } } }
+    func acknowledgeChat(_ sessionID: String) {
+        update {
+            $0.completions.removeAll { $0.sessionID == sessionID }
+            $0.attention = $0.attention.filter { $0.value.sessionID != sessionID }
+        }
+    }
 
-    func acknowledge(_ id: String) { update { $0.completions.removeAll { $0.id == id } } }
-    func acknowledgeAll() { update { $0.completions.removeAll() } }
+    func acknowledge(_ id: String) { update { $0.completions.removeAll { $0.id == id }; $0.attention.removeValue(forKey: id) } }
+    func acknowledgeAll() { update { $0.completions.removeAll(); $0.attention.removeAll() } }
 
     func update(_ change: (inout LocalData) -> Void) {
         change(&data)

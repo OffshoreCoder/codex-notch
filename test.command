@@ -13,3 +13,6 @@ xcrun swiftc "${compiler_args[@]}" Sources/CompanionState.swift Sources/EventSpo
 
 xcrun swiftc "${compiler_args[@]}" Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Sources/HookConfiguration.swift Sources/IntegrationHealth.swift Tests/IntegrationHealthTests.swift -o .build/health-tests
 ./.build/health-tests
+
+xcrun swiftc "${compiler_args[@]}" Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Tests/AttentionTests.swift -o .build/attention-tests
+./.build/attention-tests
