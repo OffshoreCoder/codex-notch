@@ -23,6 +23,7 @@ struct LocalData: Codable {
     var seenCompletions: [String] = []
     var chats: [String: ChatSummary] = [:]
     var labels: [String: String] = [:]
+    var lastRealEvent: Date?
     var importantSessionID: String?
     var quietUntil: Date?
     var quietStartedAt: Date?
@@ -32,13 +33,14 @@ struct LocalData: Codable {
     var deferredReminders: [LocalReminder] = []
 
     init() {}
-    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders }
+    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, lastRealEvent, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         completions = try c.decodeIfPresent([CompletedTurn].self, forKey: .completions) ?? []
         seenCompletions = try c.decodeIfPresent([String].self, forKey: .seenCompletions) ?? []
         chats = try c.decodeIfPresent([String: ChatSummary].self, forKey: .chats) ?? [:]
         labels = try c.decodeIfPresent([String: String].self, forKey: .labels) ?? [:]
+        lastRealEvent = try c.decodeIfPresent(Date.self, forKey: .lastRealEvent)
         importantSessionID = try c.decodeIfPresent(String.self, forKey: .importantSessionID)
         quietUntil = try c.decodeIfPresent(Date.self, forKey: .quietUntil)
         quietStartedAt = try c.decodeIfPresent(Date.self, forKey: .quietStartedAt)
@@ -169,6 +171,11 @@ final class LocalStore {
             if quiet { $0.deferredReminders = Array(($0.deferredReminders + due).suffix(512)) }
         }
         return quiet ? [] : due
+    }
+
+    func recordLastEvent(_ date: Date) {
+        guard data.lastRealEvent == nil || date > data.lastRealEvent! else { return }
+        update { $0.lastRealEvent = date }
     }
 
     func remember(_ chats: [ChatSummary]) {

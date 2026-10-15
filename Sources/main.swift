@@ -50,9 +50,20 @@ if arguments.contains("--connect-hooks") || arguments.contains("--disconnect-hoo
     exit(0)
 }
 
+if arguments.contains("--health") {
+    let report = IntegrationHealth.check(hooksURL: URL(fileURLWithPath: option("--hooks-file") ??
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/hooks.json").path),
+        executableURL: URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL,
+        spoolDirectory: EventSpool.defaultDirectory, runSelfTest: arguments.contains("--self-test"))
+    print(report.summary)
+    for check in report.checks { print("[\(check.status.rawValue)] \(check.title): \(check.detail)") }
+    exit(report.hasFailures ? 1 : 0)
+}
+
 if arguments.contains("--help") {
     print("""
     CodexNotch — локальный персонаж у выреза Mac.
+      --health [--self-test] проверить настройки/путь и локальную запись без AppKit
       --demo STATE           idle/working/coding/checking/finished/interrupted/unknown
       --preview PATH         сохранить изображение собственного окна и завершить
       --compact-preview      вместе с --preview сохранить крошечного персонажа
@@ -73,6 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var model = CompanionModel()
     private var library: LocalStore!
     private var dashboard: DashboardController!
+    private var health: HealthController!
     private var timer: Timer?
     private var demo = option("--demo").flatMap(CompanionState.init(rawValue:))
     private let spool = EventSpool(directory: EventSpool.defaultDirectory)
@@ -87,6 +99,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             FileManager.default.temporaryDirectory.appendingPathComponent("CodexNotch-preview-" + UUID().uuidString))
         controller = NotchController()
         dashboard = DashboardController(handler: { [weak self] action in self?.handle(action) })
+        health = HealthController(reportProvider: { [weak self] selfTest in
+            let report = IntegrationHealth.check(hooksURL: FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".codex/hooks.json"),
+                executableURL: URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL,
+                spoolDirectory: EventSpool.defaultDirectory, runSelfTest: selfTest)
+            let last = self?.library.data.lastRealEvent
+            let text = last.map { "Последнее реальное событие: " + Self.duration(Date().timeIntervalSince($0)) + " назад" }
+                ?? "Реальных событий ещё не получено. Это не доказывает сбой подключения."
+            return (report, text)
+        })
+        controller.healthHandler = { [weak self] in self?.health.show() }
         controller.dashboardHandler = { [weak self] in self?.dashboard.show() }
         controller.acknowledgeHandler = { [weak self] id in
             guard let self else { return }
@@ -135,7 +158,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     controller.notify(title: "Ход остановлен", sessionID: event.sessionID, duration: 4)
                 }
             }
-            if !events.isEmpty { library.remember(model.chatSummaries()) }
+            if !events.isEmpty {
+                library.remember(model.chatSummaries())
+                if let last = events.map(\.timestamp).max() { library.recordLastEvent(last) }
+            }
         }
         for reminder in library.pollReminders(liveChats: model.chatSummaries()) {
             controller.notify(title: reminder.kind == .result ? "Пора посмотреть результат" : "Ход всё ещё выполняется",

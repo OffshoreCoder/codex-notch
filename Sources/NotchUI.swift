@@ -5,6 +5,7 @@ import CoreGraphics
 @MainActor
 final class NotchController: NSObject, NSMenuDelegate {
     var demoHandler: ((CompanionState) -> Void)?
+    var healthHandler: (() -> Void)?
     var dashboardHandler: (() -> Void)?
     var liveHandler: (() -> Void)?
     var acknowledgeHandler: ((String?) -> Void)?
@@ -314,6 +315,7 @@ final class NotchController: NSObject, NSMenuDelegate {
             queue.submenu = results
             menu.addItem(queue)
         }
+        menu.addItem(item("Проверить подключение…", action: #selector(openHealth)))
         menu.addItem(item("Чаты и результаты…", action: #selector(openDashboard)))
         menu.addItem(item("Показать состояние", action: #selector(revealState)))
         menu.addItem(item(isVisible ? "Скрыть персонажа" : "Показать персонажа", action: #selector(toggleVisibility)))
@@ -382,6 +384,8 @@ final class NotchController: NSObject, NSMenuDelegate {
     }
 
     @objc private func returnToLive() { liveHandler?() }
+
+    @objc private func openHealth() { healthHandler?() }
 
     @objc private func openDashboard() { dashboardHandler?() }
 
