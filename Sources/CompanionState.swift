@@ -59,6 +59,8 @@ struct CompanionModel {
     private struct Session {
         var state: CompanionState = .idle
         var rootTurn: String?
+        var turnKey: String?
+        var startedAt: Date?
         var terminal = false
         var tools: [String: String] = [:]
         var requests: Set<String> = []
@@ -83,6 +85,8 @@ struct CompanionModel {
             if session.lastEvent == .distantPast { session.state = .idle }
         case "UserPromptSubmit":
             session.rootTurn = event.turnID
+            session.turnKey = event.turnID ?? "local-\(event.timestamp.timeIntervalSince1970)"
+            session.startedAt = event.timestamp
             session.terminal = false
             session.tools.removeAll()
             session.requests.removeAll()
@@ -144,6 +148,14 @@ struct CompanionModel {
         return CompanionSnapshot(state: selected?.value.state ?? (sessions.isEmpty ? .idle : .unknown),
                                  sessionID: selected?.key, activeCount: active.count,
                                  updatedAt: selected?.value.lastEvent ?? now)
+    }
+
+    func completion(for event: CompanionEvent) -> CompletedTurn? {
+        guard event.event == "Stop", let session = sessions[event.sessionID],
+              session.state == .finished, session.lastEvent == event.timestamp else { return nil }
+        return CompletedTurn(sessionID: event.sessionID,
+                             turnID: session.turnKey ?? event.turnID ?? "stop-\(event.timestamp.timeIntervalSince1970)",
+                             startedAt: session.startedAt, finishedAt: event.timestamp)
     }
 
     private func runningState(_ session: Session) -> CompanionState {

@@ -1,0 +1,36 @@
+import Foundation
+@main struct LibraryTests {
+    static func main() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let now = Date()
+        func event(_ name: String, _ session: String, _ turn: String, _ offset: Double) -> CompanionEvent {
+            CompanionEvent(event: name, sessionID: session, turnID: turn, toolName: nil, toolUseID: nil, timestamp: now.addingTimeInterval(offset))
+        }
+        var model = CompanionModel()
+        let store = LocalStore(directory: dir)
+        model.receive(event("UserPromptSubmit", "a", "1", 0))
+        model.receive(event("UserPromptSubmit", "b", "2", 1))
+        let stop = event("Stop", "a", "1", 2)
+        model.receive(stop)
+        precondition(model.snapshot(now: now).state == .working)
+        let result = model.completion(for: stop)!
+        precondition(store.record(result))
+        precondition(!store.record(result))
+        precondition(LocalStore(directory: dir).data.completions.count == 1)
+        store.acknowledge(result.id)
+        precondition(!LocalStore(directory: dir).record(result), "ack survives restart and duplicate stop")
+        let child = event("Stop", "b", "child", 3)
+        model.receive(child)
+        precondition(model.completion(for: child) == nil)
+        let attrs = try FileManager.default.attributesOfItem(atPath: dir.appendingPathComponent("library.json").path)
+        precondition((attrs[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+        try Data("broken".utf8).write(to: dir.appendingPathComponent("library.json"))
+        let broken = LocalStore(directory: dir)
+        precondition(broken.error != nil)
+        _ = broken.record(result)
+        let preserved = try String(contentsOf: dir.appendingPathComponent("library.json"), encoding: .utf8)
+        precondition(preserved == "broken")
+        print("Library queue, persistence, duplicates, privacy and corruption checks passed")
+    }
+}

@@ -6,6 +6,10 @@ import CoreGraphics
 final class NotchController: NSObject, NSMenuDelegate {
     var demoHandler: ((CompanionState) -> Void)?
     var liveHandler: (() -> Void)?
+    var acknowledgeHandler: ((String?) -> Void)?
+    private var completions: [CompletedTurn] = []
+    private var queueError: String?
+    private var noticeSessionID: String?
 
     private let panel: CompanionPanel
     private let companionView: CompanionView
@@ -95,9 +99,10 @@ final class NotchController: NSObject, NSMenuDelegate {
     func update(_ snapshot: CompanionSnapshot) {
         if self.snapshot.state != snapshot.state {
             animationStarted = Date()
-            let attentionDuration = snapshot.state.automaticAttentionDuration
-            attentionUntil = attentionDuration > 0
-                ? Date().addingTimeInterval(attentionDuration) : .distantPast
+            let attentionDuration: TimeInterval = snapshot.state == .interrupted ? 4 : 0
+            if attentionDuration > 0 {
+                attentionUntil = max(attentionUntil, Date().addingTimeInterval(attentionDuration))
+            }
             statusItem.button?.image = Self.menuBarImage(state: snapshot.state)
             statusItem.button?.image?.isTemplate = true
             statusItem.button?.contentTintColor = snapshot.state == .idle ? nil : snapshot.state.companionAccent
@@ -107,6 +112,22 @@ final class NotchController: NSObject, NSMenuDelegate {
         refreshExpansion()
         companionView.needsDisplay = true
         statusItem.button?.toolTip = "Codex · \(snapshot.state.companionTitle) · локально"
+    }
+
+    func updateQueue(_ completions: [CompletedTurn], error: String?) {
+        self.completions = completions
+        queueError = error
+        companionView.unreadCount = completions.count
+        statusItem.button?.title = completions.isEmpty ? "" : " \(min(completions.count, 99))"
+        statusItem.length = completions.isEmpty ? NSStatusItem.squareLength : NSStatusItem.variableLength
+        companionView.needsDisplay = true
+    }
+
+    func notify(title: String, sessionID: String? = nil, duration: TimeInterval = 8) {
+        noticeSessionID = sessionID
+        companionView.notice = title
+        attentionUntil = Date().addingTimeInterval(duration)
+        refreshExpansion()
     }
 
     func show() {
@@ -191,6 +212,7 @@ final class NotchController: NSObject, NSMenuDelegate {
     }
 
     private func refreshExpansion(now: Date = Date()) {
+        if now >= attentionUntil { companionView.notice = nil; noticeSessionID = nil }
         setExpanded(now < attentionUntil || now < expandedUntil || now < hoverUntil)
     }
 
@@ -269,6 +291,24 @@ final class NotchController: NSObject, NSMenuDelegate {
         privacy.isEnabled = false
         menu.addItem(privacy)
         menu.addItem(.separator())
+        if let queueError {
+            let warning = NSMenuItem(title: queueError, action: nil, keyEquivalent: "")
+            warning.isEnabled = false
+            menu.addItem(warning)
+        }
+        if !completions.isEmpty {
+            let results = NSMenu()
+            for result in completions.reversed().prefix(30) {
+                let row = item("Ход завершён · " + String(result.sessionID.prefix(8)), action: #selector(openResult(_:)))
+                row.representedObject = result.id
+                results.addItem(row)
+            }
+            results.addItem(.separator())
+            results.addItem(item("Отметить все просмотренными", action: #selector(acknowledgeResults)))
+            let queue = NSMenuItem(title: "Ожидают просмотра: \(completions.count)", action: nil, keyEquivalent: "")
+            queue.submenu = results
+            menu.addItem(queue)
+        }
         menu.addItem(item("Показать состояние", action: #selector(revealState)))
         menu.addItem(item(isVisible ? "Скрыть персонажа" : "Показать персонажа", action: #selector(toggleVisibility)))
         menu.addItem(item("Открыть Codex", action: #selector(openCodex)))
@@ -337,8 +377,22 @@ final class NotchController: NSObject, NSMenuDelegate {
 
     @objc private func returnToLive() { liveHandler?() }
 
+    @objc private func acknowledgeResults() { acknowledgeHandler?(nil) }
+
+    @objc private func openResult(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String,
+              let result = completions.first(where: { $0.id == key }) else { return }
+        if openChat(result.sessionID) { acknowledgeHandler?(result.id) }
+    }
+
+    @discardableResult func openChat(_ sessionID: String) -> Bool {
+        guard let id = UUID(uuidString: sessionID),
+              let url = URL(string: "codex://threads/\(id.uuidString.lowercased())") else { return false }
+        return NSWorkspace.shared.open(url)
+    }
+
     @objc private func openCodex() {
-        if let rawID = snapshot.sessionID, let id = UUID(uuidString: rawID),
+        if let rawID = noticeSessionID ?? snapshot.sessionID, let id = UUID(uuidString: rawID),
            let url = URL(string: "codex://threads/\(id.uuidString.lowercased())") {
             NSWorkspace.shared.open(url)
         } else if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.codex") {
@@ -385,6 +439,8 @@ private final class CompanionPanel: NSPanel {
 @MainActor
 private final class CompanionView: NSView {
     var snapshot = CompanionSnapshot(state: .idle, sessionID: nil, activeCount: 0, updatedAt: Date())
+    var unreadCount = 0
+    var notice: String?
     var animationTime: TimeInterval = 0
     var reducedMotion = false
     var onClick: (() -> Void)?
@@ -459,7 +515,11 @@ private final class CompanionView: NSView {
             transform.concat()
             drawRobot(at: .zero, accent: accent, showAura: false)
             NSGraphicsContext.restoreGraphicsState()
-            setAccessibilityLabel("Codex: \(snapshot.state.companionTitle)")
+            if unreadCount > 0 {
+                mint.setFill()
+                NSBezierPath(ovalIn: NSRect(x: bounds.width - 6, y: bounds.height - 6, width: 4, height: 4)).fill()
+            }
+            setAccessibilityLabel("Codex: \(snapshot.state.companionTitle), ждут просмотра: \(unreadCount)")
             return
         }
         capsule.addClip()
@@ -477,7 +537,7 @@ private final class CompanionView: NSView {
         drawRobot(at: NSPoint(x: 23, y: 16), accent: accent)
         drawText("CODEX", at: NSPoint(x: 96, y: 19), font: .systemFont(ofSize: 10, weight: .semibold),
                  color: NSColor.white.withAlphaComponent(0.48), tracking: 2.1)
-        drawText(snapshot.state.companionTitle, at: NSPoint(x: 96, y: 37),
+        drawText(notice ?? snapshot.state.companionTitle, at: NSPoint(x: 96, y: 37),
                  font: .systemFont(ofSize: 15, weight: .medium), color: NSColor.white.withAlphaComponent(0.95),
                  maxWidth: 191)
         drawText(snapshot.state.companionDetail, at: NSPoint(x: 96, y: 59),

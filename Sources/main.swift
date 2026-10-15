@@ -71,6 +71,7 @@ if arguments.contains("--help") {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: NotchController!
     private var model = CompanionModel()
+    private var library: LocalStore!
     private var timer: Timer?
     private var demo = option("--demo").flatMap(CompanionState.init(rawValue:))
     private let spool = EventSpool(directory: EventSpool.defaultDirectory)
@@ -81,7 +82,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApplication.shared.terminate(nil)
             return
         }
+        library = LocalStore(directory: option("--preview") == nil ? spool.directory :
+            FileManager.default.temporaryDirectory.appendingPathComponent("CodexNotch-preview-" + UUID().uuidString))
         controller = NotchController()
+        controller.acknowledgeHandler = { [weak self] id in
+            guard let self else { return }
+            if let id { self.library.acknowledge(id) } else { self.library.acknowledgeAll() }
+            self.refresh()
+        }
         controller.demoHandler = { [weak self] state in self?.demo = state; self?.refresh() }
         controller.liveHandler = { [weak self] in self?.demo = nil; self?.refresh() }
         refresh()
@@ -107,13 +115,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refresh() {
         if option("--preview") == nil {
-            for event in spool.drain() { model.receive(event) }
+            for event in spool.drain() {
+                model.receive(event)
+                if let result = model.completion(for: event), library.record(result) {
+                    controller.notify(title: "Ход завершён", sessionID: result.sessionID)
+                }
+            }
         }
         let live = model.snapshot()
         let snapshot = demo.map {
             CompanionSnapshot(state: $0, sessionID: nil, activeCount: [.working, .coding, .checking].contains($0) ? 1 : 0, updatedAt: Date())
         } ?? live
         controller.update(snapshot)
+        controller.updateQueue(library.data.completions, error: library.error)
     }
 
     private var lockDescriptor: Int32 = -1
