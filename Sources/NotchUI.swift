@@ -13,6 +13,7 @@ final class NotchController: NSObject, NSMenuDelegate {
     var screenSharingHandler: (() -> Void)?
     var skinHandler: ((CharacterSkin) -> Void)?
     private var skin: CharacterSkin = .robot
+    private let headphoneAccessory = HeadphoneAccessoryController()
     private var completions: [CompletedTurn] = []
     private var queueError: String?
     private var chatNames: [String: String] = [:]
@@ -77,6 +78,11 @@ final class NotchController: NSObject, NSMenuDelegate {
         companionView.onPointerChanged = { [weak self] in self?.tick() }
         companionView.contextMenu = menu
         companionView.reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        headphoneAccessory.onChange = { [weak self] wearing in
+            guard let self else { return }
+            self.companionView.headphones = wearing
+            if self.panel.isVisible, !self.displaySleeping { self.companionView.needsDisplay = true }
+        }
 
         statusItem.button?.image = Self.menuBarImage(skin: skin)
         statusItem.button?.image?.isTemplate = true
@@ -160,6 +166,10 @@ final class NotchController: NSObject, NSMenuDelegate {
         statusItem.button?.image?.isTemplate = true
         rebuildMenu()
     }
+
+    /// This is a decoration only; monitoring the current output is off by default.
+    /// CoreAudio listeners are removed as soon as the preference is disabled.
+    func setHeadphoneAccessory(enabled: Bool) { headphoneAccessory.setEnabled(enabled) }
 
     func updateQueue(_ completions: [CompletedTurn], error: String?, pendingCount: Int? = nil, chatNames: [String: String] = [:]) {
         self.completions = completions
@@ -682,6 +692,7 @@ private final class CompanionView: NSView {
     var snapshot = CompanionSnapshot(state: .idle, sessionID: nil, activeCount: 0, updatedAt: Date())
     var unreadCount = 0
     var skin: CharacterSkin = .robot
+    var headphones = false
     var notice: String?
     var animationTime: TimeInterval = 0
     var reducedMotion = false
@@ -770,7 +781,7 @@ private final class CompanionView: NSView {
             transform.scale(by: scale)
             transform.concat()
             CharacterRenderer.draw(skin: skin, state: snapshot.state, animationTime: animationTime,
-                                   reducedMotion: reducedMotion, accent: accent, showAura: false)
+                                   reducedMotion: reducedMotion, accent: accent, showAura: false, headphones: headphones)
             NSGraphicsContext.restoreGraphicsState()
             if unreadCount > 0 {
                 mint.setFill()
@@ -792,7 +803,7 @@ private final class CompanionView: NSView {
         border.stroke()
 
         CharacterRenderer.draw(skin: skin, state: snapshot.state, animationTime: animationTime,
-                               reducedMotion: reducedMotion, origin: NSPoint(x: 23, y: 16), accent: accent)
+                               reducedMotion: reducedMotion, origin: NSPoint(x: 23, y: 16), accent: accent, headphones: headphones)
         drawText("CODEX", at: NSPoint(x: 96, y: 19), font: .systemFont(ofSize: 10, weight: .semibold),
                  color: NSColor.white.withAlphaComponent(0.48), tracking: 2.1)
         drawText(notice ?? snapshot.state.companionTitle, at: NSPoint(x: 96, y: 37),

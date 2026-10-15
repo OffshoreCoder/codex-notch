@@ -369,6 +369,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.setScreenSharing(library.data.screenSharing, presentation: privacy)
         let skin = CharacterSkin(savedValue: option("--skin") ?? library.data.characterSkin)
         controller.setSkin(skin)
+        controller.setHeadphoneAccessory(enabled: library.data.headphoneAccessoryEnabled)
         dashboard.updateSkin(skin)
         controller.update(snapshot)
         controller.updateQueue(library.data.completions, error: library.error,
