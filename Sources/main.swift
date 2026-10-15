@@ -113,6 +113,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var contexts: [String: ProjectContext] = [:]
     private var contextReadInFlight = false
     private var lastContextRead = Date.distantPast
+    private var lastPoll = Date.distantPast
+    private var resumed = false
+    private var wakeObservers: [NSObjectProtocol] = []
     private var timer: Timer?
     private var demo = option("--demo").flatMap(CompanionState.init(rawValue:))
     private let spool = EventSpool(directory: EventSpool.defaultDirectory)
@@ -167,6 +170,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         controller.demoHandler = { [weak self] state in self?.demo = state; self?.refresh() }
         controller.liveHandler = { [weak self] in self?.demo = nil; self?.refresh() }
+        if option("--preview") == nil {
+            for name in [NSWorkspace.didWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
+                wakeObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.resumed = true }
+                })
+            }
+        }
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refresh() }
@@ -201,10 +211,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refresh() {
+        var completionNotices: [CompletedTurn] = []
+        var explicitNotices: [LocalNotice] = []
+        var interruptionNotices: [LocalNotice] = []
+        var catchingUp = resumed || Date().timeIntervalSince(lastPoll) > 30
+        resumed = false
+        lastPoll = Date()
         // Replay queued events before the single end-of-quiet summary, including after restart.
         controller.setQuiet(library.isQuiet() || library.quietExpired())
         if option("--preview") == nil {
             let events = spool.drain()
+            catchingUp = catchingUp || events.contains { Date().timeIntervalSince($0.timestamp) > 15 }
             for event in events {
                 let previous = model.chatSummaries().first { $0.id == event.sessionID } ?? library.data.chats[event.sessionID]
                 model.receive(event)
@@ -212,8 +229,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 library.receiveResult(event, current: current)
                 if library.receiveAttention(event, current: current, deferNotification: library.quietExpired()),
                    library.shouldNotify(event.sessionID, now: event.timestamp) {
-                    controller.notify(title: event.event == "AttentionQuestion" ? "Нужен твой ответ" : "Посмотри результат",
-                                      sessionID: event.sessionID)
+                    explicitNotices.append(LocalNotice(title: event.event == "AttentionQuestion" ? "Нужен твой ответ" : "Посмотри результат",
+                        sessionID: event.sessionID, key: event.sessionID + "|" + (event.turnID ?? "")))
                 }
                 let accepted = event.event == "SessionEnd"
                     ? (previous.map { event.timestamp >= $0.updatedAt } ?? true)
@@ -225,14 +242,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let result = model.completion(for: event),
                    library.record(result, now: event.timestamp, deferNotification: library.quietExpired()) {
                     if library.shouldNotify(result.sessionID, now: event.timestamp), library.data.attention[result.id] == nil {
-                        controller.notify(title: "Ход завершён", sessionID: result.sessionID)
+                        completionNotices.append(result)
                     }
                 }
                 if event.event == "Interrupt", library.shouldNotify(event.sessionID, now: event.timestamp),
                    model.chatSummaries().contains(where: {
                        $0.id == event.sessionID && $0.state == .interrupted && $0.updatedAt == event.timestamp
                    }) {
-                    controller.notify(title: "Ход остановлен", sessionID: event.sessionID, duration: 4)
+                    interruptionNotices.append(LocalNotice(title: "Ход остановлен", sessionID: event.sessionID, key: event.sessionID + "|" + (event.turnID ?? "")))
                 }
             }
             if !events.isEmpty {
@@ -240,6 +257,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let last = events.filter({ CompanionEvent.hookEvents.contains($0.event) }).map(\.timestamp).max() { library.recordLastEvent(last) }
             }
         }
+        let notices = NotificationPolicy.notices(completions: completionNotices, explicit: explicitNotices,
+            interruptions: interruptionNotices, codexForeground: NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.openai.codex",
+            catchingUp: catchingUp)
+        for notice in notices { controller.notify(title: notice.title, sessionID: notice.sessionID) }
         for reminder in library.pollReminders(liveChats: model.chatSummaries()) {
             controller.notify(title: reminder.kind == .result ? "Пора посмотреть результат" : "Ход всё ещё выполняется",
                               sessionID: reminder.sessionID)

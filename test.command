@@ -34,3 +34,6 @@ xcrun swiftc "${compiler_args[@]}" Sources/ResultSignal.swift Sources/CompanionS
 
 xcrun swiftc "${compiler_args[@]}" Sources/ResultSignal.swift Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Tests/ReviewTests.swift -o .build/review-tests
 ./.build/review-tests
+
+xcrun swiftc "${compiler_args[@]}" Sources/ResultSignal.swift Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Sources/NotificationPolicy.swift Tests/NotificationTests.swift -o .build/notification-tests
+./.build/notification-tests
