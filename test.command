@@ -19,3 +19,6 @@ xcrun swiftc "${compiler_args[@]}" Sources/CompanionState.swift Sources/EventSpo
 
 xcrun swiftc "${compiler_args[@]}" -lsqlite3 Sources/ThreadNames.swift Tests/ThreadNamesTests.swift -o .build/name-tests
 ./.build/name-tests
+
+xcrun swiftc "${compiler_args[@]}" -framework AppKit -framework Carbon Sources/GlobalShortcut.swift Tests/KeyboardTests.swift -o .build/keyboard-tests
+./.build/keyboard-tests

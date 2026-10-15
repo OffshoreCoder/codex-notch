@@ -31,6 +31,7 @@ enum DashboardAction {
     case watchDuration(String, TimeInterval)
     case cancelReminders(String)
     case copyAttentionInstruction
+    case configureShortcut(GlobalShortcut?)
 }
 
 private enum DashboardPalette {
@@ -56,10 +57,14 @@ private enum DashboardPalette {
 
 /// Opened only by an explicit user action; event polling never opens this panel.
 @MainActor
-final class DashboardController: NSObject, NSMenuDelegate {
+final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate {
     private enum Filter: Int { case all, running, attention, completed }
     private let panel: DashboardPanel
     private let rows = NSStackView()
+    private let search = NSSearchField()
+    private let shortcutButton = NSPopUpButton(frame: .zero, pullsDown: true)
+    private var shortcut: GlobalShortcut = .standard
+    private var selectedID: String?
     private let chatCount = NSTextField(labelWithString: "")
     private let runningCount = NSTextField(labelWithString: "")
     private let attentionCount = NSTextField(labelWithString: "")
@@ -128,6 +133,14 @@ final class DashboardController: NSObject, NSMenuDelegate {
         filterControl.target = self
         filterControl.action = #selector(changeFilter)
 
+        search.placeholderString = "Найти чат · ↑ ↓ выбрать · Enter открыть"
+        search.font = .systemFont(ofSize: 12)
+        search.controlSize = .regular
+        search.sendsSearchStringImmediately = true
+        search.maximumRecents = 0
+        search.delegate = self
+        search.setAccessibilityLabel("Поиск чатов по названию")
+
         focusStatus.font = .systemFont(ofSize: 11)
         focusStatus.textColor = DashboardPalette.secondary
         focusStatus.lineBreakMode = .byTruncatingTail
@@ -153,11 +166,11 @@ final class DashboardController: NSObject, NSMenuDelegate {
         quietStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let focusControls = NSStackView(views: [focusStatus, Self.spacer(), quietButton])
         focusControls.spacing = 10
-        let top = NSStackView(views: [heading, counts, filterControl, focusControls, quietStatus])
+        let top = NSStackView(views: [heading, counts, search, filterControl, focusControls, quietStatus])
         top.orientation = .vertical
         top.alignment = .leading
         top.spacing = 12
-        [heading, counts, filterControl, focusControls, quietStatus].forEach {
+        [heading, counts, search, filterControl, focusControls, quietStatus].forEach {
             $0.widthAnchor.constraint(equalTo: top.widthAnchor).isActive = true
         }
         let divider = NSBox()
@@ -179,7 +192,21 @@ final class DashboardController: NSObject, NSMenuDelegate {
         instruction.font = .systemFont(ofSize: 11)
         instruction.toolTip = "Скопировать инструкцию в нужный чат. Сигнал появляется только после явной команды; проверка разрешений сама по себе его не включает."
         let privacy = Self.label("Без чтения переписки", size: 10, color: DashboardPalette.dim, monospaced: true)
-        let footer = NSStackView(views: [instruction, Self.spacer(), privacy])
+        shortcutButton.addItem(withTitle: shortcut.title)
+        shortcutButton.controlSize = .small
+        shortcutButton.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
+        shortcutButton.menu?.autoenablesItems = false
+        shortcutButton.menu?.delegate = self
+        for (title, tag) in [("⌃⌥Пробел · по умолчанию", 0), ("⇧⌘Пробел", 1),
+                              ("Другое сочетание…", 2), ("Выключить", 3)] {
+            let item = NSMenuItem(title: title, action: #selector(configureShortcut(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = tag
+            shortcutButton.menu?.addItem(item)
+        }
+        shortcutButton.setAccessibilityLabel("Сочетание клавиш для пульта")
+        let footer = NSStackView(views: [instruction, shortcutButton, Self.spacer(), privacy])
+        footer.spacing = 8
         [top, divider, scroll, footer].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview($0)
@@ -247,6 +274,29 @@ final class DashboardController: NSObject, NSMenuDelegate {
         present()
     }
 
+    /// A system hotkey always opens a fresh name search instead of toggling a visible panel off.
+    func showForKeyboard(anchor: NSRect?, screen: NSScreen?) {
+        guard !isRenaming, !trackingMenu, NSApp.modalWindow == nil else { return }
+        search.stringValue = ""
+        filter = .all
+        filterControl.selectedSegment = 0
+        selectedID = nil
+        renderEntries()
+        if let anchor, let screen { show(anchor: anchor, screen: screen) } else { show() }
+        panel.makeFirstResponder(search)
+    }
+
+    func updateShortcut(_ value: GlobalShortcut, enabled: Bool, error: String?) {
+        shortcut = value
+        shortcutButton.item(at: 0)?.title = enabled && error == nil ? value.title : "Клавиши…"
+        shortcutButton.toolTip = error ?? (enabled ? "Открыть пульт: \(value.title). ↑ ↓ выбрать чат, Enter открыть." : "Настроить горячую клавишу")
+        for item in shortcutButton.menu?.items ?? [] {
+            item.state = ((item.tag == 0 && enabled && value == .standard) ||
+                          (item.tag == 1 && enabled && value == .alternate) ||
+                          (item.tag == 3 && !enabled)) ? .on : .off
+        }
+    }
+
     func hide() {
         guard !isRenaming else { return }
         panel.orderOut(nil)
@@ -298,6 +348,7 @@ final class DashboardController: NSObject, NSMenuDelegate {
     private func present() {
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+        panel.makeFirstResponder(search)
         installDismissMonitors()
     }
 
@@ -333,6 +384,67 @@ final class DashboardController: NSObject, NSMenuDelegate {
     @objc private func endQuiet() { handler(.endQuiet) }
     @objc private func copyAttentionInstruction() { handler(.copyAttentionInstruction) }
 
+    func controlTextDidChange(_ obj: Notification) {
+        guard obj.object as AnyObject? === search else { return }
+        selectedID = nil
+        renderEntries()
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard control === search else { return false }
+        switch selector {
+        case #selector(NSResponder.moveDown(_:)): moveSelection(1); return true
+        case #selector(NSResponder.moveUp(_:)): moveSelection(-1); return true
+        case #selector(NSResponder.insertNewline(_:)):
+            if let selectedID { handler(.openChat(selectedID)) }
+            return true
+        case #selector(NSResponder.cancelOperation(_:)): hide(); return true
+        default: return false
+        }
+    }
+
+    private func moveSelection(_ delta: Int) {
+        guard !renderedEntries.isEmpty else { return }
+        let old = renderedEntries.firstIndex { $0.id == selectedID } ?? 0
+        let next = min(max(old + delta, 0), renderedEntries.count - 1)
+        selectedID = renderedEntries[next].id
+        updateSelection()
+        rowViews[next].scrollToVisible(rowViews[next].bounds)
+    }
+
+    private func updateSelection() {
+        for (row, entry) in zip(rowViews, renderedEntries) { row.setSelected(entry.id == selectedID) }
+    }
+
+    @objc private func configureShortcut(_ sender: NSMenuItem) {
+        switch sender.tag {
+        case 0: handler(.configureShortcut(.standard))
+        case 1: handler(.configureShortcut(.alternate))
+        case 3: handler(.configureShortcut(nil))
+        default:
+            let alert = NSAlert()
+            alert.window.appearance = NSAppearance(named: .darkAqua)
+            alert.messageText = "Сочетание для открытия пульта"
+            alert.informativeText = "Нажми сочетание с ⌃, ⌥ или ⌘. Оно работает через системную регистрацию macOS и не требует Accessibility."
+            alert.addButton(withTitle: "Сохранить")
+            alert.addButton(withTitle: "Отмена")
+            let recorder = ShortcutRecorder(frame: NSRect(x: 0, y: 0, width: 340, height: 48))
+            recorder.shortcut = shortcut
+            alert.accessoryView = recorder
+            alert.window.initialFirstResponder = recorder
+            isRenaming = true
+            alert.beginSheetModal(for: panel) { [weak self] response in
+                guard let self else { return }
+                self.isRenaming = false
+                if response == .alertFirstButtonReturn, let value = recorder.shortcut {
+                    self.handler(.configureShortcut(value))
+                }
+                self.renderEntries()
+                self.panel.makeFirstResponder(self.search)
+            }
+        }
+    }
+
     private func renderEntries() {
         chatCount.stringValue = "\(entries.count) \(Self.chatWord(entries.count))"
         runningCount.stringValue = "В работе  \(entries.filter { $0.status == .running }.count)"
@@ -342,7 +454,9 @@ final class DashboardController: NSObject, NSMenuDelegate {
             focusStatus.stringValue = "Уведомляет только «\(important.name)»"
         } else { focusStatus.stringValue = "Все чаты могут уведомлять" }
         focusStatus.toolTip = focusStatus.stringValue
+        let terms = search.stringValue.split(whereSeparator: \.isWhitespace).map(String.init)
         let visible = entries.filter { entry in
+            guard terms.allSatisfy({ entry.name.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive], locale: .current) != nil }) else { return false }
             switch filter {
             case .all: return true
             case .running: return entry.status == .running
@@ -359,7 +473,7 @@ final class DashboardController: NSObject, NSMenuDelegate {
             }
             rowViews.removeAll()
             if visible.isEmpty {
-                let text = entries.isEmpty
+                let text = !terms.isEmpty ? "Ничего не найдено\nПопробуй другое название или очисти поиск." : entries.isEmpty
                     ? "Пока нет чатов\nЗапусти задачу в Codex с подключёнными hooks. Состояния появятся здесь автоматически."
                     : "Здесь пока пусто\nВ этом фильтре нет чатов. Остальные доступны во вкладке «Все»."
                 let empty = NSTextField(wrappingLabelWithString: text)
@@ -387,6 +501,8 @@ final class DashboardController: NSObject, NSMenuDelegate {
             }
         }
         renderedEntries = visible
+        if !visible.contains(where: { $0.id == selectedID }) { selectedID = visible.first?.id }
+        updateSelection()
     }
 
     private func rename(id: String) {
@@ -611,6 +727,11 @@ private final class DashboardRow: NSView, NSMenuDelegate {
             }
         }
     }
+    func setSelected(_ selected: Bool) {
+        layer?.borderColor = (selected ? DashboardPalette.blue : DashboardPalette.border).cgColor
+        layer?.borderWidth = selected ? 1.5 : 0.5
+        setAccessibilitySelected(selected)
+    }
     func menuWillOpen(_ menu: NSMenu) { menuTracking(true) }
     func menuDidClose(_ menu: NSMenu) { menuTracking(false) }
     @objc private func openChat() { handler(.openChat(entry.id)) }
@@ -712,5 +833,29 @@ private extension NSColor {
         self.init(calibratedRed: CGFloat((hex >> 16) & 255) / 255,
                   green: CGFloat((hex >> 8) & 255) / 255,
                   blue: CGFloat(hex & 255) / 255, alpha: 1)
+    }
+}
+
+/// Receives keys only while this app's explicit shortcut sheet owns first responder.
+@MainActor
+private final class ShortcutRecorder: NSView {
+    var shortcut: GlobalShortcut? { didSet { needsDisplay = true } }
+    private var hint = "Нажми новое сочетание"
+    override var acceptsFirstResponder: Bool { true }
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 { super.keyDown(with: event); return }
+        if let value = GlobalShortcut.captured(from: event) {
+            shortcut = value
+            hint = "Сохранить новое сочетание"
+        } else { hint = "Добавь ⌃, ⌥ или ⌘ к клавише" }
+        needsDisplay = true
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        let text = "\(shortcut?.title ?? "…")\n\(hint)"
+        (text as NSString).draw(in: bounds.insetBy(dx: 4, dy: 4), withAttributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .medium),
+            .foregroundColor: DashboardPalette.text, .paragraphStyle: paragraph])
     }
 }

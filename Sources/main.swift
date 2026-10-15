@@ -100,6 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var model = CompanionModel()
     private var library: LocalStore!
     private var dashboard: DashboardController!
+    private var dashboardShortcut: GlobalShortcutController?
     private var health: HealthController!
     private var previewDirectory: URL?
     private var codexNames: [String: String] = [:]
@@ -145,6 +146,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let location = self.controller.dashboardLocation() {
                 self.dashboard.toggle(anchor: location.anchor, screen: location.screen)
             } else { self.dashboard.show() }
+        }
+        if option("--preview") == nil {
+            dashboardShortcut = GlobalShortcutController { [weak self] in
+                guard let self else { return }
+                self.controller.dismissStateCard()
+                let location = self.controller.dashboardLocation()
+                self.dashboard.showForKeyboard(anchor: location?.anchor, screen: location?.screen)
+            }
+            updateShortcutStatus()
         }
         controller.acknowledgeHandler = { [weak self] id in
             guard let self else { return }
@@ -261,6 +271,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .watchDuration(let id, let seconds):
             if let chat = model.chatSummaries().first(where: { $0.id == id }) { library.watchDuration(chat, threshold: seconds) }
         case .cancelReminders(let id): library.cancelReminders(id)
+        case .configureShortcut(let value):
+            if let dashboardShortcut {
+                let changed = dashboardShortcut.configure(value)
+                updateShortcutStatus()
+                if !changed {
+                    let alert = NSAlert()
+                    alert.messageText = "Сочетание недоступно"
+                    alert.informativeText = dashboardShortcut.error ?? "Выбери другое сочетание клавиш."
+                    alert.addButton(withTitle: "Понятно")
+                    alert.runModal()
+                }
+            }
         case .copyAttentionInstruction:
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(Self.attentionInstruction, forType: .string)
@@ -271,6 +293,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             alert.runModal()
         }
         refresh()
+    }
+
+    private func updateShortcutStatus() {
+        guard let dashboardShortcut else { return }
+        dashboard.updateShortcut(dashboardShortcut.shortcut, enabled: dashboardShortcut.isEnabled,
+                                 error: dashboardShortcut.error)
     }
 
     private func finishQuiet() {

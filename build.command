@@ -11,7 +11,7 @@ mkdir -p "$app_path/Contents/MacOS" "$project_root/.build/module-cache"
 xcrun swiftc -O -swift-version 5 \
   -target "$(uname -m)-apple-macosx13.0" \
   -module-cache-path "$project_root/.build/module-cache" \
-  -framework AppKit -framework Foundation -lsqlite3 \
+  -framework AppKit -framework Foundation -framework Carbon -lsqlite3 \
   "$project_root"/Sources/*.swift -o "$app_path/Contents/MacOS/CodexNotch"
 cat > "$app_path/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
