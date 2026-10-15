@@ -117,6 +117,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dashboardShortcut: GlobalShortcutController?
     private var health: HealthController!
     private var previewDirectory: URL?
+    private let sharedInstance = InstanceLock()
+    private var instanceObserver: NSObjectProtocol?
+    private let showDashboardNotification = Notification.Name("local.codex.notch.show-dashboard")
     private var privacy = PrivacyPresentation()
     private var codexNames: [String: String] = [:]
     private let nameReader = ThreadNames()
@@ -157,6 +160,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statistics.setEnabled(library.data.statisticsEnabled)
         controller = NotchController()
         dashboard = DashboardController(handler: { [weak self] action in self?.handle(action) })
+        if option("--preview") == nil, ProcessInfo.processInfo.environment["CODEX_NOTCH_DATA_DIR"] == nil {
+            instanceObserver = DistributedNotificationCenter.default().addObserver(forName: showDashboardNotification,
+                object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.revealDashboard() }
+                }
+        }
         health = HealthController(reportProvider: { [weak self] selfTest in
             let baseReport = IntegrationHealth.check(hooksURL: FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".codex/hooks.json"),
@@ -287,6 +296,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statistics?.suspend()
         spoolWatcher?.stop()
         timer?.invalidate()
+        if let instanceObserver { DistributedNotificationCenter.default().removeObserver(instanceObserver) }
+        sharedInstance.release()
         if let previewDirectory { try? FileManager.default.removeItem(at: previewDirectory) }
     }
 
@@ -505,6 +516,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let location = controller.dashboardLocation() {
             settings.show(anchor: location.anchor, screen: location.screen)
         } else { settings.show() }
+    }
+
+    private func revealDashboard() {
+        settings?.hide()
+        controller.dismissStateCard()
+        if let location = controller.dashboardLocation() {
+            dashboard.showForKeyboard(anchor: location.anchor, screen: location.screen)
+        } else { dashboard.showForKeyboard(anchor: nil, screen: nil) }
+        refresh()
     }
 
     private func showHealth() {
@@ -789,6 +809,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var lockDescriptor: Int32 = -1
     private func acquireInstanceLock() -> Bool {
+        // Copies on the Desktop and in the installed folder share one live UI.
+        // Test/demo runtimes explicitly supplied via the environment stay isolated.
+        if ProcessInfo.processInfo.environment["CODEX_NOTCH_DATA_DIR"] == nil {
+            let lock = FileManager.default.temporaryDirectory.appendingPathComponent("local.codex.notch.instance.lock")
+            switch sharedInstance.acquire(url: lock) {
+            case .acquired: break
+            case .inUse:
+                DistributedNotificationCenter.default().postNotificationName(showDashboardNotification, object: nil,
+                    userInfo: nil, deliverImmediately: true)
+                return false
+            default: return false
+            }
+        }
         do { try spool.prepare() } catch { return false }
         let path = spool.directory.appendingPathComponent("app.lock").path
         lockDescriptor = open(path, O_CREAT | O_RDWR | O_NOFOLLOW, 0o600)
