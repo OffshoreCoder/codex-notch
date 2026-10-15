@@ -24,6 +24,7 @@ struct DashboardEntry: Equatable {
     var isGroupSelected = false
     var isArchived = false
     var canArchive = false
+    var isMasked = false
     var contextText: String = ""
     var contextPath: String = ""
     var status: DashboardStatus = .idle
@@ -35,6 +36,7 @@ enum DashboardAction {
     case toggleGroupSelection(String)
     case archive(String)
     case restoreArchive(String)
+    case toggleSharing
     case startGroup
     case cancelGroup
     case acknowledgeChat(String)
@@ -98,6 +100,9 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
     private var entries: [DashboardEntry] = []
     private var renderedEntries: [DashboardEntry] = []
     private var rowViews: [DashboardRow] = []
+    private var sharing = false
+    private let sharingButton = NSButton(image: NSImage(systemSymbolName: "eye.slash", accessibilityDescription: "Режим демонстрации") ?? NSImage(), target: nil, action: nil)
+    private let privacyLabel = NSTextField(labelWithString: "Без чтения переписки")
     private var filter = Filter.all
     private var isRenaming = false
     private var trackingMenu = false
@@ -135,7 +140,13 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
         close.contentTintColor = DashboardPalette.secondary
         close.toolTip = "Закрыть · Esc"
         close.setAccessibilityLabel("Закрыть чаты Codex")
-        let heading = NSStackView(views: [title, chatCount, Self.spacer(), close])
+        sharingButton.target = self
+        sharingButton.action = #selector(toggleSharing)
+        sharingButton.isBordered = false
+        sharingButton.contentTintColor = DashboardPalette.secondary
+        sharingButton.toolTip = "Режим демонстрации: скрыть названия и пути здесь"
+        sharingButton.setAccessibilityLabel("Режим демонстрации")
+        let heading = NSStackView(views: [title, chatCount, Self.spacer(), sharingButton, close])
         heading.spacing = 10
         close.widthAnchor.constraint(equalToConstant: 24).isActive = true
         close.heightAnchor.constraint(equalToConstant: 24).isActive = true
@@ -225,7 +236,8 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
         instruction.controlSize = .small
         instruction.font = .systemFont(ofSize: 11)
         instruction.toolTip = "Скопировать инструкцию в нужный чат. Сигнал появляется только после явной команды; проверка разрешений сама по себе его не включает."
-        let privacy = Self.label("Без чтения переписки", size: 10, color: DashboardPalette.dim, monospaced: true)
+        privacyLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+        privacyLabel.textColor = DashboardPalette.dim
         shortcutButton.addItem(withTitle: shortcut.title)
         shortcutButton.controlSize = .small
         shortcutButton.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
@@ -239,7 +251,7 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
             shortcutButton.menu?.addItem(item)
         }
         shortcutButton.setAccessibilityLabel("Сочетание клавиш для пульта")
-        let footer = NSStackView(views: [instruction, shortcutButton, Self.spacer(), privacy])
+        let footer = NSStackView(views: [instruction, shortcutButton, Self.spacer(), privacyLabel])
         footer.spacing = 8
         [top, divider, scroll, footer].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
@@ -274,6 +286,19 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
         if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
         if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
     }
+
+    func setScreenSharing(_ active: Bool) {
+        guard sharing != active else { return }
+        sharing = active
+        if let sheet = panel.attachedSheet { panel.endSheet(sheet, returnCode: .alertSecondButtonReturn) }
+        search.stringValue = ""
+        entries.removeAll()
+        sharingButton.contentTintColor = active ? DashboardPalette.amber : DashboardPalette.secondary
+        sharingButton.setAccessibilityValue(active ? "Включён" : "Выключен")
+        privacyLabel.stringValue = active ? "Скрыто только здесь" : "Без чтения переписки"
+        renderEntries()
+    }
+    @objc private func toggleSharing() { handler(.toggleSharing) }
 
     func updateGroup(text: String?, selectedCount: Int, hasGroup: Bool) {
         groupStatus.stringValue = text ?? (selectedCount > 0 ? "Выбрано ходов: \(selectedCount)" : "Выбери ходы в меню ••• у чатов")
@@ -554,7 +579,7 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
     }
 
     private func rename(id: String) {
-        guard !isRenaming, let entry = entries.first(where: { $0.id == id }) else { return }
+        guard !isRenaming, let entry = entries.first(where: { $0.id == id }), !entry.isMasked else { return }
         let alert = NSAlert()
         alert.window.appearance = NSAppearance(named: .darkAqua)
         alert.messageText = "Название чата на этом Mac"
@@ -642,6 +667,7 @@ private final class DashboardRow: NSView, NSMenuDelegate {
     private let reminderLabel = NSTextField(labelWithString: "")
     private let acknowledge = NSButton(title: "Проверено", target: nil, action: nil)
     private let reminder = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let renameItem = NSMenuItem(title: "Переименовать на этом Mac…", action: nil, keyEquivalent: "")
     private let archiveItem = NSMenuItem(title: "Убрать в локальный архив", action: nil, keyEquivalent: "")
     private let groupItem = NSMenuItem(title: "Добавить ход в ожидание группы", action: nil, keyEquivalent: "")
     private let importantItem = NSMenuItem(title: "Уведомлять об этом чате", action: nil, keyEquivalent: "")
@@ -687,9 +713,9 @@ private final class DashboardRow: NSView, NSMenuDelegate {
         more.setAccessibilityLabel("Действия с чатом")
         more.menu?.autoenablesItems = false
         more.menu?.delegate = self
-        let rename = NSMenuItem(title: "Переименовать на этом Mac…", action: #selector(renameChat), keyEquivalent: "")
-        rename.target = self
-        more.menu?.addItem(rename)
+        renameItem.action = #selector(renameChat)
+        renameItem.target = self
+        more.menu?.addItem(renameItem)
         more.menu?.addItem(.separator())
         importantItem.target = self
         importantItem.action = #selector(toggleImportant)
@@ -770,7 +796,7 @@ private final class DashboardRow: NSView, NSMenuDelegate {
         star.isHidden = !entry.isImportant
         unread.stringValue = entry.unreadCount > 0 ? "новых: \(entry.unreadCount)" : ""
         unread.isHidden = entry.unreadCount == 0
-        identity.stringValue = entry.contextText.isEmpty ? "Контекст проекта ещё не получен" : entry.contextText
+        identity.stringValue = entry.isMasked ? "Контекст скрыт" : (entry.contextText.isEmpty ? "Контекст проекта ещё не получен" : entry.contextText)
         identity.toolTip = entry.contextPath.isEmpty ? nil : entry.contextPath
         state.update(text: entry.stateText, status: entry.status)
         elapsed.stringValue = entry.elapsedText
@@ -782,6 +808,7 @@ private final class DashboardRow: NSView, NSMenuDelegate {
         acknowledge.isHidden = !pending
         acknowledge.isEnabled = pending
         importantItem.state = entry.isImportant ? .on : .off
+        renameItem.isEnabled = !entry.isMasked
         archiveItem.title = entry.isArchived ? "Вернуть из архива" : "Убрать в локальный архив"
         archiveItem.isEnabled = entry.isArchived || entry.canArchive
         groupItem.state = entry.isGroupSelected ? .on : .off

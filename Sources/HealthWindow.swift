@@ -77,6 +77,8 @@ final class HealthController: NSObject {
         ])
     }
 
+    func hide() { window.orderOut(nil) }
+
     func show() {
         render(runSelfTest: false)
         NSApp.activate(ignoringOtherApps: true)

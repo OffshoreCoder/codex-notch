@@ -9,11 +9,15 @@ final class NotchController: NSObject, NSMenuDelegate {
     var dashboardHandler: (() -> Void)?
     var liveHandler: (() -> Void)?
     var acknowledgeHandler: ((String?) -> Void)?
+    var screenSharingHandler: (() -> Void)?
     private var completions: [CompletedTurn] = []
     private var queueError: String?
     private var chatNames: [String: String] = [:]
     private var quiet = false
     private var noticeSessionID: String?
+    private var noticeTitle: String?
+    private var screenSharing = false
+    private var privacyPresentation = PrivacyPresentation()
 
     private let panel: CompanionPanel
     private let companionView: CompanionView
@@ -121,6 +125,7 @@ final class NotchController: NSObject, NSMenuDelegate {
 
     func updateQueue(_ completions: [CompletedTurn], error: String?, pendingCount: Int? = nil, chatNames: [String: String] = [:]) {
         self.completions = completions
+        privacyPresentation.observe(sessionIDs: completions.map { $0.sessionID })
         self.chatNames = chatNames
         queueError = error
         let count = pendingCount ?? completions.count
@@ -130,16 +135,41 @@ final class NotchController: NSObject, NSMenuDelegate {
         companionView.needsDisplay = true
     }
 
+    /// Manual presentation mode: masks only this companion's visible surfaces.
+    /// Pass the same ordered IDs used by the dashboard to keep generic task labels aligned.
+    func setScreenSharing(_ active: Bool, sessionIDs: [String] = []) {
+        privacyPresentation.observe(sessionIDs: sessionIDs)
+        applyScreenSharing(active)
+    }
+
+    /// Share one presentation map with the dashboard, including ordinals assigned earlier.
+    func setScreenSharing(_ active: Bool, presentation: PrivacyPresentation) {
+        privacyPresentation = presentation
+        applyScreenSharing(active)
+    }
+
+    private func applyScreenSharing(_ active: Bool) {
+        guard screenSharing != active else { return }
+        screenSharing = active
+        if let noticeTitle {
+            companionView.notice = privacyPresentation.notice(noticeTitle, isSharing: active)
+        }
+        rebuildMenu()
+        updateStatusItemDescription()
+        companionView.needsDisplay = true
+    }
+
     func setQuiet(_ active: Bool) {
         quiet = active
-        if active { attentionUntil = .distantPast; companionView.notice = nil; noticeSessionID = nil }
+        if active { attentionUntil = .distantPast; companionView.notice = nil; noticeSessionID = nil; noticeTitle = nil }
         refreshExpansion()
     }
 
     func notify(title: String, sessionID: String? = nil, duration: TimeInterval = 8) {
         guard !quiet else { return }
         noticeSessionID = sessionID
-        companionView.notice = title
+        noticeTitle = title
+        companionView.notice = privacyPresentation.notice(title, isSharing: screenSharing)
         attentionUntil = Date().addingTimeInterval(duration)
         refreshExpansion()
     }
@@ -181,6 +211,7 @@ final class NotchController: NSObject, NSMenuDelegate {
         suppressHoverUntilExit = true
         companionView.notice = nil
         noticeSessionID = nil
+        noticeTitle = nil
         setExpanded(false)
     }
 
@@ -263,7 +294,7 @@ final class NotchController: NSObject, NSMenuDelegate {
     }
 
     private func refreshExpansion(now: Date = Date()) {
-        if now >= attentionUntil { companionView.notice = nil; noticeSessionID = nil }
+        if now >= attentionUntil { companionView.notice = nil; noticeSessionID = nil; noticeTitle = nil }
         setExpanded(now < attentionUntil || now < expandedUntil || now < hoverUntil)
     }
 
@@ -343,14 +374,16 @@ final class NotchController: NSObject, NSMenuDelegate {
         menu.addItem(privacy)
         menu.addItem(.separator())
         if let queueError {
-            let warning = NSMenuItem(title: queueError, action: nil, keyEquivalent: "")
+            let warning = NSMenuItem(title: privacyPresentation.diagnostic(queueError, isSharing: screenSharing), action: nil, keyEquivalent: "")
             warning.isEnabled = false
             menu.addItem(warning)
         }
         if !completions.isEmpty {
             let results = NSMenu()
             for result in completions.reversed().prefix(30) {
-                let row = item("Ход завершён · " + (chatNames[result.sessionID] ?? chatNames[result.sessionID.lowercased()] ?? "Чат без названия"), action: #selector(openResult(_:)))
+                let original = chatNames[result.sessionID] ?? chatNames[result.sessionID.lowercased()] ?? "Чат без названия"
+                let name = privacyPresentation.name(for: result.sessionID, original: original, isSharing: screenSharing)
+                let row = item("Ход завершён · " + name, action: #selector(openResult(_:)))
                 row.representedObject = result.id
                 results.addItem(row)
             }
@@ -360,6 +393,10 @@ final class NotchController: NSObject, NSMenuDelegate {
             queue.submenu = results
             menu.addItem(queue)
         }
+        let presentation = item("Режим демонстрации", action: #selector(toggleScreenSharing))
+        presentation.state = screenSharing ? .on : .off
+        presentation.toolTip = "Скрывает названия задач и пути в Codex Notch"
+        menu.addItem(presentation)
         menu.addItem(item("Проверить подключение…", action: #selector(openHealth)))
         menu.addItem(item("Чаты и результаты…", action: #selector(openDashboard)))
         menu.addItem(item("Показать состояние", action: #selector(revealState)))
@@ -371,10 +408,11 @@ final class NotchController: NSObject, NSMenuDelegate {
         automatic.state = selectedDisplay == nil ? .on : .off
         screenMenu.addItem(automatic)
         screenMenu.addItem(.separator())
-        for screen in NSScreen.screens {
+        for (index, screen) in NSScreen.screens.enumerated() {
             let id = Self.displayID(screen)
             let suffix = screen.safeAreaInsets.top > 0 ? " · с вырезом" : ""
-            let choice = item(screen.localizedName + suffix, action: #selector(selectScreen(_:)))
+            let screenName = screenSharing ? "Экран \(index + 1)" : screen.localizedName
+            let choice = item(screenName + suffix, action: #selector(selectScreen(_:)))
             choice.representedObject = NSNumber(value: id)
             choice.state = selectedDisplay == id ? .on : .off
             screenMenu.addItem(choice)
@@ -443,6 +481,8 @@ final class NotchController: NSObject, NSMenuDelegate {
     }
 
     @objc private func returnToLive() { liveHandler?() }
+
+    @objc private func toggleScreenSharing() { screenSharingHandler?() }
 
     @objc private func openHealth() { healthHandler?() }
 

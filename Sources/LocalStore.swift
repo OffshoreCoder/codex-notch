@@ -33,6 +33,7 @@ struct LocalData: Codable {
     var seenCompletions: [String] = []
     var chats: [String: ChatSummary] = [:]
     var labels: [String: String] = [:]
+    var screenSharing = false
     var archivedChats: [String: Date] = [:]
     var turnGroup: TurnGroup? = nil
     var reviewingIDs: [String] = []
@@ -51,13 +52,14 @@ struct LocalData: Codable {
     var deferredAttentionIDs: [String] = []
 
     init() {}
-    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, workingDirectories, results, reviewingIDs, turnGroup, archivedChats, lastRealEvent, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders, attention, seenAttention, deferredAttentionIDs }
+    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, workingDirectories, results, reviewingIDs, turnGroup, archivedChats, screenSharing, lastRealEvent, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders, attention, seenAttention, deferredAttentionIDs }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         completions = try c.decodeIfPresent([CompletedTurn].self, forKey: .completions) ?? []
         seenCompletions = try c.decodeIfPresent([String].self, forKey: .seenCompletions) ?? []
         chats = try c.decodeIfPresent([String: ChatSummary].self, forKey: .chats) ?? [:]
         labels = try c.decodeIfPresent([String: String].self, forKey: .labels) ?? [:]
+        screenSharing = try c.decodeIfPresent(Bool.self, forKey: .screenSharing) ?? false
         archivedChats = try c.decodeIfPresent([String: Date].self, forKey: .archivedChats) ?? [:]
         turnGroup = try c.decodeIfPresent(TurnGroup.self, forKey: .turnGroup)
         reviewingIDs = try c.decodeIfPresent([String].self, forKey: .reviewingIDs) ?? []

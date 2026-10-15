@@ -104,6 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dashboardShortcut: GlobalShortcutController?
     private var health: HealthController!
     private var previewDirectory: URL?
+    private var privacy = PrivacyPresentation()
     private var codexNames: [String: String] = [:]
     private let nameReader = ThreadNames()
     private var lastNameRead = Date.distantPast
@@ -151,7 +152,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 status: names?.status == .available ? .ok : .warning)
             return (IntegrationHealth.Report(checks: baseReport.checks + [nameCheck]), text)
         })
-        controller.healthHandler = { [weak self] in self?.health.show() }
+        controller.healthHandler = { [weak self] in
+            guard let self else { return }
+            if self.library.data.screenSharing {
+                let alert = NSAlert()
+                alert.messageText = "Диагностика содержит локальные пути"
+                alert.informativeText = "Для просмотра выключи режим демонстрации."
+                alert.runModal()
+            } else { self.health.show() }
+        }
+        controller.screenSharingHandler = { [weak self] in self?.handle(.toggleSharing) }
         controller.dashboardHandler = { [weak self] in
             guard let self else { return }
             self.controller.dismissStateCard()
@@ -301,10 +311,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let snapshot = demo.map {
             CompanionSnapshot(state: $0, sessionID: nil, activeCount: [.working, .coding, .checking].contains($0) ? 1 : 0, updatedAt: Date())
         } ?? attentionSnapshot ?? live
+        privacy.observe(sessionIDs: library.data.chats.keys.sorted())
+        controller.setScreenSharing(library.data.screenSharing, presentation: privacy)
         controller.update(snapshot)
         controller.updateQueue(library.data.completions, error: library.error,
             pendingCount: Set(library.data.completions.map(\.id) + Array(library.data.attention.keys) + library.data.reviewingIDs).count,
-            chatNames: library.data.labels.merging(codexNames) { manual, _ in manual })
+            chatNames: Dictionary(uniqueKeysWithValues: library.data.chats.keys.map { ($0, displayName(for: $0)) }))
         updateDashboard()
     }
 
@@ -315,6 +327,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 library.openChat(id)
                 dashboard.hide()
             }
+        case .toggleSharing:
+            library.update { $0.screenSharing.toggle() }
+            health.hide()
+            dashboard.setScreenSharing(library.data.screenSharing)
         case .archive(let id): library.archive(id, liveChat: model.chatSummaries().first { $0.id == id })
         case .restoreArchive(let id): library.restoreArchive(id)
         case .toggleGroupSelection(let id):
@@ -434,8 +450,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             entry.canArchive = library.canArchive(chat.id, liveChat: live[chat.id])
             entry.isGroupSelected = groupSelection.contains(chat.id)
             entry.isReviewing = reviewing
-            entry.contextText = contexts[chat.id]?.displayText ?? ""
-            entry.contextPath = contexts[chat.id]?.workingDirectory ?? ""
+            entry.isMasked = library.data.screenSharing
+            entry.contextText = privacy.context(contexts[chat.id]?.displayText, isSharing: library.data.screenSharing) ?? ""
+            entry.contextPath = privacy.context(contexts[chat.id]?.workingDirectory, isSharing: library.data.screenSharing) ?? ""
             if request != nil || reviewing { entry.status = .attention }
             else if [.working, .coding, .checking].contains(state) { entry.status = .running }
             else if state == .finished { entry.status = .completed }
@@ -444,11 +461,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             else { entry.status = .idle }
             return entry
         }
+        dashboard.setScreenSharing(library.data.screenSharing)
         dashboard.update(entries: entries)
     }
 
     private func displayName(for sessionID: String) -> String {
-        library.data.labels[sessionID] ?? codexNames[sessionID.lowercased()] ?? "Чат без названия"
+        let original = library.data.labels[sessionID] ?? codexNames[sessionID.lowercased()] ?? "Чат без названия"
+        return privacy.name(for: sessionID, original: original, isSharing: library.data.screenSharing)
     }
 
     private func refreshContexts() {

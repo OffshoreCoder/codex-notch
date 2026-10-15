@@ -43,3 +43,6 @@ xcrun swiftc "${compiler_args[@]}" Sources/ResultSignal.swift Sources/CompanionS
 
 xcrun swiftc "${compiler_args[@]}" Sources/ResultSignal.swift Sources/TurnGroup.swift Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Tests/ArchiveTests.swift -o .build/archive-tests
 ./.build/archive-tests
+
+xcrun swiftc "${compiler_args[@]}" Sources/PrivacyPresentation.swift Tests/PrivacyTests.swift -o .build/privacy-tests
+./.build/privacy-tests
