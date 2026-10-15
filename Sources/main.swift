@@ -162,7 +162,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         controller.acknowledgeHandler = { [weak self] id in
             guard let self else { return }
-            if let id { self.library.acknowledge(id) } else { self.library.acknowledgeAll() }
+            if let id { self.library.markOpened(id) } else { self.library.acknowledgeAll() }
             self.refresh()
         }
         controller.demoHandler = { [weak self] state in self?.demo = state; self?.refresh() }
@@ -256,7 +256,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } ?? attentionSnapshot ?? live
         controller.update(snapshot)
         controller.updateQueue(library.data.completions, error: library.error,
-            pendingCount: Set(library.data.completions.map(\.id) + Array(library.data.attention.keys)).count,
+            pendingCount: Set(library.data.completions.map(\.id) + Array(library.data.attention.keys) + library.data.reviewingIDs).count,
             chatNames: library.data.labels.merging(codexNames) { manual, _ in manual })
         updateDashboard()
     }
@@ -265,12 +265,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch action {
         case .openChat(let id):
             if controller.openChat(id) {
-                library.acknowledgeChat(id)
+                library.openChat(id)
                 dashboard.hide()
             }
         case .openAttachment(let key):
             if let result = library.data.results[key], let path = result.path, let valid = ResultSignal.safePath(path) {
-                if NSWorkspace.shared.open(URL(fileURLWithPath: valid)) { dashboard.hide() }
+                if NSWorkspace.shared.open(URL(fileURLWithPath: valid)) { library.markOpened(key); dashboard.hide() }
             } else {
                 let alert = NSAlert()
                 alert.messageText = "Файл результата недоступен"
@@ -349,9 +349,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             let elapsed = duration.map { "Ход: " + Self.duration($0) } ?? ""
             let request = library.data.attention.values.first { $0.sessionID == chat.id }
+            let reviewing = library.data.reviewingIDs.contains { $0.hasPrefix(chat.id + "|") }
             let deferred = library.data.deferredReminders.filter { $0.sessionID == chat.id }
             var entry = DashboardEntry(id: chat.id, name: displayName(for: chat.id),
-                stateText: request?.state.companionTitle ?? (state == .finished ? "Ход завершён" : state.companionTitle),
+                stateText: reviewing ? "На проверке" : (request?.state.companionTitle ?? (state == .finished ? "Ход завершён" : state.companionTitle)),
                 elapsedText: state == .unknown ? "Последнее известное состояние" : elapsed,
                 updatedText: "Последний сигнал: " + Self.duration(Date().timeIntervalSince(chat.updatedAt)) + " назад",
                 unreadCount: library.data.completions.filter { $0.sessionID == chat.id }.count,
@@ -371,9 +372,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 entry.canOpenResult = result.path != nil
                 entry.resultText = (result.id == currentKey ? "" : "Предыдущий ход · ") + result.checkText
             }
+            entry.isReviewing = reviewing
             entry.contextText = contexts[chat.id]?.displayText ?? ""
             entry.contextPath = contexts[chat.id]?.workingDirectory ?? ""
-            if request != nil { entry.status = .attention }
+            if request != nil || reviewing { entry.status = .attention }
             else if [.working, .coding, .checking].contains(state) { entry.status = .running }
             else if state == .finished { entry.status = .completed }
             else if state == .interrupted { entry.status = .interrupted }

@@ -20,6 +20,7 @@ struct DashboardEntry: Equatable {
     var resultID: String? = nil
     var resultText: String = ""
     var canOpenResult = false
+    var isReviewing = false
     var contextText: String = ""
     var contextPath: String = ""
     var status: DashboardStatus = .idle
@@ -598,7 +599,7 @@ private final class DashboardRow: NSView, NSMenuDelegate {
     private let resultLabel = NSTextField(labelWithString: "")
     private let resultButton = NSButton(title: "Результат", target: nil, action: nil)
     private let reminderLabel = NSTextField(labelWithString: "")
-    private let acknowledge = NSButton(title: "Просмотрено", target: nil, action: nil)
+    private let acknowledge = NSButton(title: "Проверено", target: nil, action: nil)
     private let reminder = NSPopUpButton(frame: .zero, pullsDown: true)
     private let importantItem = NSMenuItem(title: "Уведомлять об этом чате", action: nil, keyEquivalent: "")
     private var entry: DashboardEntry
@@ -727,7 +728,7 @@ private final class DashboardRow: NSView, NSMenuDelegate {
         resultLabel.stringValue = entry.resultText
         resultLabel.isHidden = entry.resultText.isEmpty
         resultButton.isHidden = !entry.canOpenResult
-        let pending = entry.unreadCount > 0 || !entry.attentionText.isEmpty
+        let pending = entry.unreadCount > 0 || !entry.attentionText.isEmpty || entry.isReviewing
         acknowledge.isHidden = !pending
         acknowledge.isEnabled = pending
         importantItem.state = entry.isImportant ? .on : .off

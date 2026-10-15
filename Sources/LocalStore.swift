@@ -33,6 +33,7 @@ struct LocalData: Codable {
     var seenCompletions: [String] = []
     var chats: [String: ChatSummary] = [:]
     var labels: [String: String] = [:]
+    var reviewingIDs: [String] = []
     var results: [String: TurnResult] = [:]
     var workingDirectories: [String: String] = [:]
     var lastRealEvent: Date?
@@ -48,13 +49,14 @@ struct LocalData: Codable {
     var deferredAttentionIDs: [String] = []
 
     init() {}
-    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, workingDirectories, results, lastRealEvent, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders, attention, seenAttention, deferredAttentionIDs }
+    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, workingDirectories, results, reviewingIDs, lastRealEvent, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders, attention, seenAttention, deferredAttentionIDs }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         completions = try c.decodeIfPresent([CompletedTurn].self, forKey: .completions) ?? []
         seenCompletions = try c.decodeIfPresent([String].self, forKey: .seenCompletions) ?? []
         chats = try c.decodeIfPresent([String: ChatSummary].self, forKey: .chats) ?? [:]
         labels = try c.decodeIfPresent([String: String].self, forKey: .labels) ?? [:]
+        reviewingIDs = try c.decodeIfPresent([String].self, forKey: .reviewingIDs) ?? []
         results = try c.decodeIfPresent([String: TurnResult].self, forKey: .results) ?? [:]
         workingDirectories = try c.decodeIfPresent([String: String].self, forKey: .workingDirectories) ?? [:]
         lastRealEvent = try c.decodeIfPresent(Date.self, forKey: .lastRealEvent)
@@ -299,15 +301,30 @@ final class LocalStore {
         update { $0.labels[sessionID] = label.isEmpty ? nil : label }
     }
     func name(for sessionID: String) -> String { data.labels[sessionID] ?? "Чат " + String(sessionID.prefix(8)) }
+    /// Opening is navigation. Explicit review requests and attached results require confirmation.
+    func markOpened(_ key: String) {
+        let needsReview = data.results[key] != nil || data.attention[key]?.kind == .review || data.reviewingIDs.contains(key)
+        if needsReview {
+            guard !data.reviewingIDs.contains(key) else { return }
+            update { $0.reviewingIDs = Array(($0.reviewingIDs + [key]).suffix(512)) }
+        } else { acknowledge(key) }
+    }
+    func openChat(_ sessionID: String) {
+        let keys = Set(data.completions.filter { $0.sessionID == sessionID }.map(\.id) +
+            data.attention.values.filter { $0.sessionID == sessionID }.map(\.id))
+        for key in keys { markOpened(key) }
+    }
+
     func acknowledgeChat(_ sessionID: String) {
         update {
+            $0.reviewingIDs.removeAll { $0.hasPrefix(sessionID + "|") }
             $0.completions.removeAll { $0.sessionID == sessionID }
             $0.attention = $0.attention.filter { $0.value.sessionID != sessionID }
         }
     }
 
-    func acknowledge(_ id: String) { update { $0.completions.removeAll { $0.id == id }; $0.attention.removeValue(forKey: id) } }
-    func acknowledgeAll() { update { $0.completions.removeAll(); $0.attention.removeAll() } }
+    func acknowledge(_ id: String) { update { $0.reviewingIDs.removeAll { $0 == id }; $0.completions.removeAll { $0.id == id }; $0.attention.removeValue(forKey: id) } }
+    func acknowledgeAll() { update { $0.reviewingIDs.removeAll(); $0.completions.removeAll(); $0.attention.removeAll() } }
 
     func update(_ change: (inout LocalData) -> Void) {
         change(&data)
