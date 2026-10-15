@@ -243,6 +243,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let accepted = event.event == "SessionEnd"
                     ? (previous.map { event.timestamp >= $0.updatedAt } ?? true)
                     : (current?.updatedAt == event.timestamp)
+                library.restoreForEvent(event, accepted: accepted)
                 library.receiveGroup(event, accepted: accepted, current: current)
                 if accepted { library.rememberWorkingDirectory(event) }
                 if accepted, ["Stop", "Interrupt"].contains(event.event) { library.remember(model.chatSummaries()) }
@@ -314,6 +315,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 library.openChat(id)
                 dashboard.hide()
             }
+        case .archive(let id): library.archive(id, liveChat: model.chatSummaries().first { $0.id == id })
+        case .restoreArchive(let id): library.restoreArchive(id)
         case .toggleGroupSelection(let id):
             if groupSelection.contains(id) { groupSelection.remove(id) } else { groupSelection.insert(id) }
         case .startGroup:
@@ -427,6 +430,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 entry.canOpenResult = result.path != nil
                 entry.resultText = (result.id == currentKey ? "" : "Предыдущий ход · ") + result.checkText
             }
+            entry.isArchived = library.data.archivedChats[chat.id] != nil
+            entry.canArchive = library.canArchive(chat.id, liveChat: live[chat.id])
             entry.isGroupSelected = groupSelection.contains(chat.id)
             entry.isReviewing = reviewing
             entry.contextText = contexts[chat.id]?.displayText ?? ""

@@ -22,6 +22,8 @@ struct DashboardEntry: Equatable {
     var canOpenResult = false
     var isReviewing = false
     var isGroupSelected = false
+    var isArchived = false
+    var canArchive = false
     var contextText: String = ""
     var contextPath: String = ""
     var status: DashboardStatus = .idle
@@ -31,6 +33,8 @@ enum DashboardAction {
     case openChat(String)
     case openAttachment(String)
     case toggleGroupSelection(String)
+    case archive(String)
+    case restoreArchive(String)
     case startGroup
     case cancelGroup
     case acknowledgeChat(String)
@@ -69,7 +73,7 @@ private enum DashboardPalette {
 /// Opened only by an explicit user action; event polling never opens this panel.
 @MainActor
 final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate {
-    private enum Filter: Int { case all, running, attention, completed }
+    private enum Filter: Int { case all, running, attention, completed, archived }
     private let panel: DashboardPanel
     private let rows = NSStackView()
     private let search = NSSearchField()
@@ -88,7 +92,7 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
     private let cancelGroupItem = NSMenuItem(title: "Убрать ожидание", action: nil, keyEquivalent: "")
     private let quietStatus = NSTextField(labelWithString: "Уведомления включены")
     private let endQuietItem = NSMenuItem(title: "Выключить режим", action: nil, keyEquivalent: "")
-    private let filterControl = NSSegmentedControl(labels: ["Все", "В работе", "Ждут тебя", "Готовы"],
+    private let filterControl = NSSegmentedControl(labels: ["Все", "В работе", "Ждут тебя", "Готовы", "Архив"],
                                                   trackingMode: .selectOne, target: nil, action: nil)
     private let handler: (DashboardAction) -> Void
     private var entries: [DashboardEntry] = []
@@ -486,7 +490,8 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
     }
 
     private func renderEntries() {
-        chatCount.stringValue = "\(entries.count) \(Self.chatWord(entries.count))"
+        let activeCount = entries.filter { !$0.isArchived }.count
+        chatCount.stringValue = "\(activeCount) \(Self.chatWord(activeCount))"
         runningCount.stringValue = "В работе  \(entries.filter { $0.status == .running }.count)"
         attentionCount.stringValue = "Ждут тебя  \(entries.filter { $0.status == .attention }.count)"
         completedCount.stringValue = "Готовы  \(entries.reduce(0) { $0 + max(0, $1.unreadCount) })"
@@ -497,11 +502,14 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
         let terms = search.stringValue.split(whereSeparator: \.isWhitespace).map(String.init)
         let visible = entries.filter { entry in
             guard terms.allSatisfy({ entry.name.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive], locale: .current) != nil }) else { return false }
+            if filter == .archived { return entry.isArchived }
+            guard !entry.isArchived else { return false }
             switch filter {
             case .all: return true
             case .running: return entry.status == .running
             case .attention: return entry.status == .attention
             case .completed: return entry.unreadCount > 0
+            case .archived: return entry.isArchived
             }
         }
         if !visible.isEmpty, renderedEntries.map(\.id) == visible.map(\.id), rowViews.count == visible.count {
@@ -634,6 +642,7 @@ private final class DashboardRow: NSView, NSMenuDelegate {
     private let reminderLabel = NSTextField(labelWithString: "")
     private let acknowledge = NSButton(title: "Проверено", target: nil, action: nil)
     private let reminder = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let archiveItem = NSMenuItem(title: "Убрать в локальный архив", action: nil, keyEquivalent: "")
     private let groupItem = NSMenuItem(title: "Добавить ход в ожидание группы", action: nil, keyEquivalent: "")
     private let importantItem = NSMenuItem(title: "Уведомлять об этом чате", action: nil, keyEquivalent: "")
     private var entry: DashboardEntry
@@ -688,6 +697,10 @@ private final class DashboardRow: NSView, NSMenuDelegate {
         groupItem.target = self
         groupItem.action = #selector(toggleGroupSelection)
         more.menu?.addItem(groupItem)
+        more.menu?.addItem(.separator())
+        archiveItem.target = self
+        archiveItem.action = #selector(toggleArchive)
+        more.menu?.addItem(archiveItem)
         let open = DashboardOpenButton(title: "Открыть", target: self, action: #selector(openChat))
         open.font = .systemFont(ofSize: 11, weight: .semibold)
         acknowledge.target = self
@@ -769,6 +782,8 @@ private final class DashboardRow: NSView, NSMenuDelegate {
         acknowledge.isHidden = !pending
         acknowledge.isEnabled = pending
         importantItem.state = entry.isImportant ? .on : .off
+        archiveItem.title = entry.isArchived ? "Вернуть из архива" : "Убрать в локальный архив"
+        archiveItem.isEnabled = entry.isArchived || entry.canArchive
         groupItem.state = entry.isGroupSelected ? .on : .off
         groupItem.isEnabled = entry.canWatchDuration
         groupItem.title = entry.isGroupSelected ? "Убрать ход из выбора" : "Добавить ход в ожидание группы"
@@ -795,6 +810,7 @@ private final class DashboardRow: NSView, NSMenuDelegate {
     @objc private func openAttachment() { if let key = entry.resultID { handler(.openAttachment(key)) } }
     @objc private func acknowledgeChat() { handler(.acknowledgeChat(entry.id)) }
     @objc private func renameChat() { handler(.rename(entry.id, entry.name)) }
+    @objc private func toggleArchive() { handler(entry.isArchived ? .restoreArchive(entry.id) : .archive(entry.id)) }
     @objc private func toggleGroupSelection() { handler(.toggleGroupSelection(entry.id)) }
     @objc private func toggleImportant() { handler(.important(entry.isImportant ? nil : entry.id)) }
     @objc private func remindCompleted(_ sender: NSMenuItem) { handler(.remindCompleted(entry.id, TimeInterval(sender.tag))) }

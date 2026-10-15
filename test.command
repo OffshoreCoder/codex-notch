@@ -40,3 +40,6 @@ xcrun swiftc "${compiler_args[@]}" Sources/ResultSignal.swift Sources/TurnGroup.
 
 xcrun swiftc "${compiler_args[@]}" Sources/ResultSignal.swift Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Sources/TurnGroup.swift Tests/TurnGroupTests.swift -o .build/group-tests
 ./.build/group-tests
+
+xcrun swiftc "${compiler_args[@]}" Sources/ResultSignal.swift Sources/TurnGroup.swift Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Tests/ArchiveTests.swift -o .build/archive-tests
+./.build/archive-tests

@@ -33,6 +33,7 @@ struct LocalData: Codable {
     var seenCompletions: [String] = []
     var chats: [String: ChatSummary] = [:]
     var labels: [String: String] = [:]
+    var archivedChats: [String: Date] = [:]
     var turnGroup: TurnGroup? = nil
     var reviewingIDs: [String] = []
     var results: [String: TurnResult] = [:]
@@ -50,13 +51,14 @@ struct LocalData: Codable {
     var deferredAttentionIDs: [String] = []
 
     init() {}
-    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, workingDirectories, results, reviewingIDs, turnGroup, lastRealEvent, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders, attention, seenAttention, deferredAttentionIDs }
+    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, workingDirectories, results, reviewingIDs, turnGroup, archivedChats, lastRealEvent, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders, attention, seenAttention, deferredAttentionIDs }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         completions = try c.decodeIfPresent([CompletedTurn].self, forKey: .completions) ?? []
         seenCompletions = try c.decodeIfPresent([String].self, forKey: .seenCompletions) ?? []
         chats = try c.decodeIfPresent([String: ChatSummary].self, forKey: .chats) ?? [:]
         labels = try c.decodeIfPresent([String: String].self, forKey: .labels) ?? [:]
+        archivedChats = try c.decodeIfPresent([String: Date].self, forKey: .archivedChats) ?? [:]
         turnGroup = try c.decodeIfPresent(TurnGroup.self, forKey: .turnGroup)
         reviewingIDs = try c.decodeIfPresent([String].self, forKey: .reviewingIDs) ?? []
         results = try c.decodeIfPresent([String: TurnResult].self, forKey: .results) ?? [:]
@@ -106,12 +108,34 @@ final class LocalStore {
         let quiet = isQuiet(now: now) || deferNotification
         update {
             if quiet { $0.deferredCompletionIDs = Array(($0.deferredCompletionIDs + [completion.id]).suffix(512)) }
+            $0.archivedChats.removeValue(forKey: completion.sessionID)
             $0.completions.append(completion)
             $0.completions = Array($0.completions.suffix(512))
             $0.seenCompletions.append(completion.id)
             $0.seenCompletions = Array($0.seenCompletions.suffix(4096))
         }
         return true
+    }
+
+    func canArchive(_ sessionID: String, liveChat: ChatSummary? = nil, now: Date = Date()) -> Bool {
+        let chat = liveChat ?? data.chats[sessionID]
+        let active = chat.map { [.working, .coding, .checking].contains($0.state) && now.timeIntervalSince($0.updatedAt) < CompanionModel.staleAfter } ?? false
+        return !active && !data.completions.contains { $0.sessionID == sessionID } &&
+            !data.attention.values.contains { $0.sessionID == sessionID } &&
+            !data.reviewingIDs.contains { $0.hasPrefix(sessionID + "|") } &&
+            !data.reminders.contains { $0.sessionID == sessionID } &&
+            !data.deferredReminders.contains { $0.sessionID == sessionID } &&
+            !(data.turnGroup?.turns.contains { $0.sessionID == sessionID && $0.status == .running } ?? false)
+    }
+    func archive(_ sessionID: String, liveChat: ChatSummary? = nil, now: Date = Date()) {
+        guard canArchive(sessionID, liveChat: liveChat, now: now), data.chats[sessionID] != nil else { return }
+        update { $0.archivedChats[sessionID] = now; if $0.importantSessionID == sessionID { $0.importantSessionID = nil } }
+    }
+    func restoreArchive(_ sessionID: String) { update { $0.archivedChats.removeValue(forKey: sessionID) } }
+    func restoreForEvent(_ event: CompanionEvent, accepted: Bool) {
+        guard accepted, ["UserPromptSubmit", "PreToolUse"].contains(event.event),
+              let archived = data.archivedChats[event.sessionID], event.timestamp > archived else { return }
+        restoreArchive(event.sessionID)
     }
 
     func startGroup(_ chats: [ChatSummary]) {
@@ -153,6 +177,7 @@ final class LocalStore {
               event.timestamp >= current.updatedAt, ![.idle, .interrupted].contains(current.state),
               data.results[result.id].map({ $0.timestamp < result.timestamp }) ?? true else { return false }
         update {
+            $0.archivedChats.removeValue(forKey: event.sessionID)
             $0.results[result.id] = result
             if $0.results.count > 512 {
                 $0.results = Dictionary(uniqueKeysWithValues: $0.results.values.sorted { $0.timestamp > $1.timestamp }.prefix(512).map { ($0.id, $0) })
@@ -278,6 +303,7 @@ final class LocalStore {
         guard !data.seenAttention.contains(key) else { return false }
         let quiet = isQuiet(now: event.timestamp) || deferNotification
         update {
+            $0.archivedChats.removeValue(forKey: event.sessionID)
             $0.attention = $0.attention.filter { $0.value.sessionID != event.sessionID }
             $0.attention[request.id] = request
             if $0.attention.count > 512 {
