@@ -17,6 +17,9 @@ struct DashboardEntry: Equatable {
     var canWatchDuration: Bool = false
     var reminderText: String = ""
     var attentionText: String = ""
+    var resultID: String? = nil
+    var resultText: String = ""
+    var canOpenResult = false
     var contextText: String = ""
     var contextPath: String = ""
     var status: DashboardStatus = .idle
@@ -24,6 +27,7 @@ struct DashboardEntry: Equatable {
 
 enum DashboardAction {
     case openChat(String)
+    case openAttachment(String)
     case acknowledgeChat(String)
     case rename(String, String)
     case important(String?)
@@ -591,6 +595,8 @@ private final class DashboardRow: NSView, NSMenuDelegate {
     private let state = DashboardStateChip()
     private let elapsed = NSTextField(labelWithString: "")
     private let updated = NSTextField(labelWithString: "")
+    private let resultLabel = NSTextField(labelWithString: "")
+    private let resultButton = NSButton(title: "Результат", target: nil, action: nil)
     private let reminderLabel = NSTextField(labelWithString: "")
     private let acknowledge = NSButton(title: "Просмотрено", target: nil, action: nil)
     private let reminder = NSPopUpButton(frame: .zero, pullsDown: true)
@@ -618,7 +624,7 @@ private final class DashboardRow: NSView, NSMenuDelegate {
         star.font = .systemFont(ofSize: 12)
         star.textColor = DashboardPalette.amber
         star.toolTip = "Выбран для уведомлений"
-        [identity, elapsed, updated, reminderLabel].forEach {
+        [identity, elapsed, updated, reminderLabel, resultLabel].forEach {
             $0.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
             $0.textColor = DashboardPalette.secondary
             $0.lineBreakMode = .byTruncatingTail
@@ -679,9 +685,14 @@ private final class DashboardRow: NSView, NSMenuDelegate {
         more.widthAnchor.constraint(equalToConstant: 28).isActive = true
         let status = NSStackView(views: [state, elapsed])
         status.spacing = 10
-        let actions = NSStackView(views: [open, acknowledge, reminder])
+        resultButton.target = self
+        resultButton.action = #selector(openAttachment)
+        resultButton.bezelStyle = .rounded
+        resultButton.controlSize = .small
+        resultButton.font = .systemFont(ofSize: 11, weight: .medium)
+        let actions = NSStackView(views: [open, resultButton, acknowledge, reminder])
         actions.spacing = 8
-        let content = NSStackView(views: [heading, identity, status, updated, reminderLabel, actions])
+        let content = NSStackView(views: [heading, identity, status, updated, resultLabel, reminderLabel, actions])
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 7
@@ -713,6 +724,9 @@ private final class DashboardRow: NSView, NSMenuDelegate {
         state.update(text: entry.stateText, status: entry.status)
         elapsed.stringValue = entry.elapsedText
         updated.stringValue = entry.updatedText
+        resultLabel.stringValue = entry.resultText
+        resultLabel.isHidden = entry.resultText.isEmpty
+        resultButton.isHidden = !entry.canOpenResult
         let pending = entry.unreadCount > 0 || !entry.attentionText.isEmpty
         acknowledge.isHidden = !pending
         acknowledge.isEnabled = pending
@@ -737,6 +751,7 @@ private final class DashboardRow: NSView, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) { menuTracking(true) }
     func menuDidClose(_ menu: NSMenu) { menuTracking(false) }
     @objc private func openChat() { handler(.openChat(entry.id)) }
+    @objc private func openAttachment() { if let key = entry.resultID { handler(.openAttachment(key)) } }
     @objc private func acknowledgeChat() { handler(.acknowledgeChat(entry.id)) }
     @objc private func renameChat() { handler(.rename(entry.id, entry.name)) }
     @objc private func toggleImportant() { handler(.important(entry.isImportant ? nil : entry.id)) }

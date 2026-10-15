@@ -39,6 +39,7 @@ struct CompanionEvent: Codable {
     let toolUseID: String?
     let timestamp: Date
     var workingDirectory: String? = nil
+    var result: TurnResult? = nil
 
     static let hookEvents: Set<String> = [
         "SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest",
@@ -46,7 +47,7 @@ struct CompanionEvent: Codable {
     ]
 
     static let attentionEvents: Set<String> = ["AttentionQuestion", "AttentionReview", "AttentionClear"]
-    static let supported = hookEvents.union(attentionEvents)
+    static let supported = hookEvents.union(attentionEvents).union(["Result"])
 
     /// An explicit, exact no-op marker. Never inspect or retain arbitrary command content.
     static func attentionFromHook(_ data: Data, now: Date = Date()) -> CompanionEvent? {
@@ -64,6 +65,23 @@ struct CompanionEvent: Codable {
         guard let command, let event = names[command] else { return nil }
         return CompanionEvent(event: event, sessionID: base.sessionID, turnID: base.turnID,
                               toolName: nil, toolUseID: nil, timestamp: now)
+    }
+
+    static func resultFromHook(_ data: Data, now: Date = Date()) -> CompanionEvent? {
+        guard let base = fromHook(data, now: now), base.event == "PostToolUse", let turn = base.turnID,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let input = object["tool_input"] as? [String: Any] else { return nil }
+        let command: String?
+        switch base.toolName {
+        case "Bash", "shell_command": command = input["command"] as? String
+        case "exec_command": command = input["cmd"] as? String
+        default: return nil
+        }
+        guard let command, let result = ResultSignal.parse(command: command, sessionID: base.sessionID, turnID: turn, now: now) else { return nil }
+        var event = CompanionEvent(event: "Result", sessionID: base.sessionID, turnID: turn,
+                                   toolName: nil, toolUseID: nil, timestamp: now)
+        event.result = result
+        return event
     }
 
     static func explicitAttention(kind: String, session: String, turn: String, now: Date = Date()) -> CompanionEvent? {

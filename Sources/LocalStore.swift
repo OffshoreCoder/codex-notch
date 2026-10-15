@@ -33,6 +33,7 @@ struct LocalData: Codable {
     var seenCompletions: [String] = []
     var chats: [String: ChatSummary] = [:]
     var labels: [String: String] = [:]
+    var results: [String: TurnResult] = [:]
     var workingDirectories: [String: String] = [:]
     var lastRealEvent: Date?
     var importantSessionID: String?
@@ -47,13 +48,14 @@ struct LocalData: Codable {
     var deferredAttentionIDs: [String] = []
 
     init() {}
-    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, workingDirectories, lastRealEvent, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders, attention, seenAttention, deferredAttentionIDs }
+    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, workingDirectories, results, lastRealEvent, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders, attention, seenAttention, deferredAttentionIDs }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         completions = try c.decodeIfPresent([CompletedTurn].self, forKey: .completions) ?? []
         seenCompletions = try c.decodeIfPresent([String].self, forKey: .seenCompletions) ?? []
         chats = try c.decodeIfPresent([String: ChatSummary].self, forKey: .chats) ?? [:]
         labels = try c.decodeIfPresent([String: String].self, forKey: .labels) ?? [:]
+        results = try c.decodeIfPresent([String: TurnResult].self, forKey: .results) ?? [:]
         workingDirectories = try c.decodeIfPresent([String: String].self, forKey: .workingDirectories) ?? [:]
         lastRealEvent = try c.decodeIfPresent(Date.self, forKey: .lastRealEvent)
         importantSessionID = try c.decodeIfPresent(String.self, forKey: .importantSessionID)
@@ -104,6 +106,21 @@ final class LocalStore {
             $0.completions = Array($0.completions.suffix(512))
             $0.seenCompletions.append(completion.id)
             $0.seenCompletions = Array($0.seenCompletions.suffix(4096))
+        }
+        return true
+    }
+
+    @discardableResult func receiveResult(_ event: CompanionEvent, current: ChatSummary?) -> Bool {
+        guard event.event == "Result", let result = event.result, let current,
+              result.sessionID == event.sessionID, result.turnID == event.turnID,
+              current.id == result.sessionID, current.turnID == result.turnID,
+              event.timestamp >= current.updatedAt, ![.idle, .interrupted].contains(current.state),
+              data.results[result.id].map({ $0.timestamp < result.timestamp }) ?? true else { return false }
+        update {
+            $0.results[result.id] = result
+            if $0.results.count > 512 {
+                $0.results = Dictionary(uniqueKeysWithValues: $0.results.values.sorted { $0.timestamp > $1.timestamp }.prefix(512).map { ($0.id, $0) })
+            }
         }
         return true
     }

@@ -17,6 +17,7 @@ if arguments.contains("--hook") {
             let spool = EventSpool(directory: EventSpool.defaultDirectory)
             try spool.append(event)
             if let attention = CompanionEvent.attentionFromHook(input, now: event.timestamp) { try spool.append(attention) }
+            if let result = CompanionEvent.resultFromHook(input, now: event.timestamp) { try spool.append(result) }
         }
     } catch {
         // An absent/unwritable companion must never block the user's agent.
@@ -208,6 +209,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let previous = model.chatSummaries().first { $0.id == event.sessionID } ?? library.data.chats[event.sessionID]
                 model.receive(event)
                 let current = model.chatSummaries().first { $0.id == event.sessionID } ?? library.data.chats[event.sessionID]
+                library.receiveResult(event, current: current)
                 if library.receiveAttention(event, current: current, deferNotification: library.quietExpired()),
                    library.shouldNotify(event.sessionID, now: event.timestamp) {
                     controller.notify(title: event.event == "AttentionQuestion" ? "Нужен твой ответ" : "Посмотри результат",
@@ -265,6 +267,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if controller.openChat(id) {
                 library.acknowledgeChat(id)
                 dashboard.hide()
+            }
+        case .openAttachment(let key):
+            if let result = library.data.results[key], let path = result.path, let valid = ResultSignal.safePath(path) {
+                if NSWorkspace.shared.open(URL(fileURLWithPath: valid)) { dashboard.hide() }
+            } else {
+                let alert = NSAlert()
+                alert.messageText = "Файл результата недоступен"
+                alert.informativeText = "Файл мог переместиться. Открой чат, чтобы уточнить результат."
+                alert.runModal()
             }
         case .acknowledgeChat(let id): library.acknowledgeChat(id)
         case .rename(let id, let name): library.rename(id, to: name == codexNames[id.lowercased()] ? "" : name)
@@ -352,6 +363,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         Self.duration($0.dueAt.timeIntervalSinceNow)
                 }.joined(separator: " · ") + (deferred.isEmpty ? "" : " · Напоминание ожидает окончания тишины"),
                 attentionText: request == nil ? "" : "Требует внимания")
+            let currentKey = chat.turnID.map { chat.id + "|" + $0 }
+            let result = currentKey.flatMap { library.data.results[$0] } ?? library.data.completions.reversed()
+                .filter { $0.sessionID == chat.id }.compactMap { library.data.results[$0.id] }.first
+            if let result {
+                entry.resultID = result.id
+                entry.canOpenResult = result.path != nil
+                entry.resultText = (result.id == currentKey ? "" : "Предыдущий ход · ") + result.checkText
+            }
             entry.contextText = contexts[chat.id]?.displayText ?? ""
             entry.contextPath = contexts[chat.id]?.workingDirectory ?? ""
             if request != nil { entry.status = .attention }
@@ -415,6 +434,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     : codex-notch:review
     Если просьба больше не актуальна:
     : codex-notch:clear
+    Для готового файла или отчёта можешь сообщить проверки и прикрепить существующий локальный файл отдельной shell no-op командой:
+    : codex-notch:result BASE64
+    BASE64 — base64 от UTF-8 JSON {"checks":"passed|failed|notRun","path":"/абсолютный/путь/report.md"}. Поле path необязательно. Сначала создай файл. Передавай только честный итог запущенных проверок. Для file поддержаны документы/отчёты/изображения, исполняемые файлы и скрипты не открываются. После этого при необходимости отправь маркер review.
     Это no-op маркеры для локального hook PostToolUse. Используй прямой shell tool, без обёртки JavaScript, echo, дополнительных команд и перенаправлений. Не отправляй question для проверки разрешения, обычной работы или простого завершения хода. Не отправляй marker заранее. Если shell недоступен, просто продолжай общение; не утверждай, что сигнал был отправлен.
     """
 
