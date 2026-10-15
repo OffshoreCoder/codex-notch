@@ -117,18 +117,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refresh() {
-        if library.quietExpired() { finishQuiet() }
-        controller.setQuiet(library.isQuiet())
+        // Replay queued events before the single end-of-quiet summary, including after restart.
+        controller.setQuiet(library.isQuiet() || library.quietExpired())
         if option("--preview") == nil {
             let events = spool.drain()
             for event in events {
                 model.receive(event)
-                if let result = model.completion(for: event), library.record(result) {
-                    if library.shouldNotify(result.sessionID) {
+                if let result = model.completion(for: event), library.record(result, now: event.timestamp) {
+                    if library.shouldNotify(result.sessionID, now: event.timestamp) {
                         controller.notify(title: "Ход завершён", sessionID: result.sessionID)
                     }
                 }
-                if event.event == "Interrupt", library.shouldNotify(event.sessionID),
+                if event.event == "Interrupt", library.shouldNotify(event.sessionID, now: event.timestamp),
                    model.chatSummaries().contains(where: {
                        $0.id == event.sessionID && $0.state == .interrupted && $0.updatedAt == event.timestamp
                    }) {
@@ -137,6 +137,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             if !events.isEmpty { library.remember(model.chatSummaries()) }
         }
+        for reminder in library.pollReminders(liveChats: model.chatSummaries()) {
+            controller.notify(title: reminder.kind == .result ? "Пора посмотреть результат" : "Ход всё ещё выполняется",
+                              sessionID: reminder.sessionID)
+        }
+        if library.quietExpired() { finishQuiet() }
+        controller.setQuiet(library.isQuiet())
         let live = model.snapshot()
         let snapshot = demo.map {
             CompanionSnapshot(state: $0, sessionID: nil, activeCount: [.working, .coding, .checking].contains($0) ? 1 : 0, updatedAt: Date())
@@ -155,6 +161,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .important(let id): library.selectImportant(id)
         case .quiet(let seconds): library.beginQuiet(seconds: seconds)
         case .endQuiet: finishQuiet()
+        case .remindCompleted(let id, let seconds): library.remindResult(id, after: seconds)
+        case .watchDuration(let id, let seconds):
+            if let chat = model.chatSummaries().first(where: { $0.id == id }) { library.watchDuration(chat, threshold: seconds) }
+        case .cancelReminders(let id): library.cancelReminders(id)
         }
         refresh()
     }
@@ -162,7 +172,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func finishQuiet() {
         let count = library.endQuiet()
         controller.setQuiet(false)
-        if count > 0 { controller.notify(title: "Ждут просмотра: \(count)") }
+        if count > 0 { controller.notify(title: "Пора вернуться: \(count)") }
     }
 
     private func updateDashboard() {
@@ -193,7 +203,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 elapsedText: state == .unknown ? "Последнее известное состояние" : elapsed,
                 updatedText: "Последний сигнал: " + Self.duration(Date().timeIntervalSince(chat.updatedAt)) + " назад",
                 unreadCount: library.data.completions.filter { $0.sessionID == chat.id }.count,
-                isImportant: library.data.importantSessionID == chat.id)
+                isImportant: library.data.importantSessionID == chat.id,
+                canRemindResult: library.data.completions.contains { $0.sessionID == chat.id },
+                canWatchDuration: live[chat.id] != nil && [.working, .coding, .checking].contains(state) && chat.startedAt != nil,
+                reminderText: library.data.reminders.filter { $0.sessionID == chat.id }.map {
+                    ($0.kind == .result ? "Вернуться через " : "Проверить длительность через ") +
+                        Self.duration($0.dueAt.timeIntervalSinceNow)
+                }.joined(separator: " · "))
         }
         dashboard.update(entries: entries)
     }

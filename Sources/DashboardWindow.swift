@@ -9,6 +9,9 @@ struct DashboardEntry: Equatable {
     let updatedText: String
     let unreadCount: Int
     var isImportant: Bool = false
+    var canRemindResult: Bool = false
+    var canWatchDuration: Bool = false
+    var reminderText: String = ""
 }
 
 enum DashboardAction {
@@ -18,6 +21,9 @@ enum DashboardAction {
     case important(String?)
     case quiet(TimeInterval?)
     case endQuiet
+    case remindCompleted(String, TimeInterval)
+    case watchDuration(String, TimeInterval)
+    case cancelReminders(String)
 }
 
 /// Explicitly opened, keyboard-accessible window. The notch itself remains passive.
@@ -139,6 +145,22 @@ final class DashboardController: NSObject {
         endQuietItem.isEnabled = active
     }
 
+    /// Render only this window's own content. Never reads pixels from the screen.
+    func capturePreview(to url: URL) {
+        guard let view = window.contentView else { return }
+        view.layoutSubtreeIfNeeded()
+        let size = view.bounds.size
+        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil,
+                                            pixelsWide: Int(size.width * 2), pixelsHigh: Int(size.height * 2),
+                                            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                            isPlanar: false, colorSpaceName: .deviceRGB,
+                                            bytesPerRow: 0, bitsPerPixel: 0) else { return }
+        bitmap.size = size
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        guard let png = bitmap.representation(using: .png, properties: [:]) else { return }
+        try? png.write(to: url, options: .atomic)
+    }
+
     @objc private func selectQuiet(_ sender: NSMenuItem) {
         handler(.quiet(sender.tag < 0 ? nil : TimeInterval(sender.tag)))
     }
@@ -224,6 +246,8 @@ private final class DashboardRow: NSView {
     private let updated = NSTextField(labelWithString: "")
     private let importantLabel = NSTextField(labelWithString: "")
     private let important = NSButton(checkboxWithTitle: "Уведомлять об этом", target: nil, action: nil)
+    private let reminder = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let reminderLabel = NSTextField(labelWithString: "")
     private let acknowledge = NSButton(title: "Просмотрено", target: nil, action: nil)
     private var entry: DashboardEntry
     private let handler: (DashboardAction) -> Void
@@ -255,6 +279,30 @@ private final class DashboardRow: NSView {
         important.font = .systemFont(ofSize: 11)
         important.target = self
         important.action = #selector(toggleImportant)
+        reminderLabel.font = .systemFont(ofSize: 11)
+        reminderLabel.textColor = .secondaryLabelColor
+        reminderLabel.lineBreakMode = .byTruncatingTail
+        reminder.controlSize = .small
+        reminder.font = .systemFont(ofSize: 11)
+        reminder.addItem(withTitle: "Напомнить")
+        reminder.menu?.autoenablesItems = false
+        for minutes in [5, 10, 30] {
+            let item = NSMenuItem(title: "Вернуться через \(minutes) мин", action: #selector(remindCompleted(_:)), keyEquivalent: "")
+            item.tag = minutes * 60
+            item.target = self
+            reminder.menu?.addItem(item)
+        }
+        reminder.menu?.addItem(.separator())
+        for minutes in [10, 20, 30] {
+            let item = NSMenuItem(title: "Если ход длится дольше \(minutes) мин", action: #selector(watchDuration(_:)), keyEquivalent: "")
+            item.tag = minutes * 60
+            item.target = self
+            reminder.menu?.addItem(item)
+        }
+        reminder.menu?.addItem(.separator())
+        let cancelReminder = NSMenuItem(title: "Отменить напоминания", action: #selector(cancelReminders), keyEquivalent: "")
+        cancelReminder.target = self
+        reminder.menu?.addItem(cancelReminder)
 
         let open = NSButton(title: "Открыть чат", target: self, action: #selector(openChat))
         let rename = NSButton(title: "Название…", target: self, action: #selector(renameChat))
@@ -270,11 +318,11 @@ private final class DashboardRow: NSView {
         heading.spacing = 8
         let status = NSStackView(views: [state, elapsed])
         status.spacing = 10
-        let actions = NSStackView(views: [open, rename, acknowledge])
+        let actions = NSStackView(views: [open, rename, acknowledge, reminder])
         actions.spacing = 8
         let notification = NSStackView(views: [important, importantLabel])
         notification.spacing = 10
-        let content = NSStackView(views: [heading, status, updated, notification, actions])
+        let content = NSStackView(views: [heading, status, updated, notification, reminderLabel, actions])
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 6
@@ -286,7 +334,8 @@ private final class DashboardRow: NSView {
             content.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             content.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             heading.widthAnchor.constraint(equalTo: content.widthAnchor),
-            updated.widthAnchor.constraint(equalTo: content.widthAnchor)
+            updated.widthAnchor.constraint(equalTo: content.widthAnchor),
+            reminderLabel.widthAnchor.constraint(equalTo: content.widthAnchor)
         ])
         update(entry)
     }
@@ -304,10 +353,24 @@ private final class DashboardRow: NSView {
         acknowledge.isEnabled = entry.unreadCount > 0
         important.state = entry.isImportant ? .on : .off
         importantLabel.stringValue = entry.isImportant ? "Выбран для уведомлений" : ""
+        reminderLabel.stringValue = entry.reminderText
+        reminderLabel.toolTip = entry.reminderText
+        reminderLabel.isHidden = entry.reminderText.isEmpty
+        for item in reminder.menu?.items ?? [] {
+            switch item.action {
+            case #selector(remindCompleted(_:)): item.isEnabled = entry.canRemindResult
+            case #selector(watchDuration(_:)): item.isEnabled = entry.canWatchDuration
+            case #selector(cancelReminders): item.isEnabled = !entry.reminderText.isEmpty
+            default: break
+            }
+        }
     }
 
     @objc private func openChat() { handler(.openChat(entry.id)) }
     @objc private func acknowledgeChat() { handler(.acknowledgeChat(entry.id)) }
     @objc private func renameChat() { handler(.rename(entry.id, entry.name)) }
     @objc private func toggleImportant() { handler(.important(entry.isImportant ? nil : entry.id)) }
+    @objc private func remindCompleted(_ sender: NSMenuItem) { handler(.remindCompleted(entry.id, TimeInterval(sender.tag))) }
+    @objc private func watchDuration(_ sender: NSMenuItem) { handler(.watchDuration(entry.id, TimeInterval(sender.tag))) }
+    @objc private func cancelReminders() { handler(.cancelReminders(entry.id)) }
 }

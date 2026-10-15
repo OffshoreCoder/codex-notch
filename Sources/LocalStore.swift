@@ -8,6 +8,16 @@ struct CompletedTurn: Codable, Equatable, Identifiable {
     var id: String { sessionID + "|" + turnID }
 }
 
+enum ReminderKind: String, Codable { case result, duration }
+struct LocalReminder: Codable, Equatable, Identifiable {
+    let id: String
+    let kind: ReminderKind
+    let sessionID: String
+    let turnID: String
+    let dueAt: Date
+    var targetKey: String { sessionID + "|" + turnID }
+}
+
 struct LocalData: Codable {
     var completions: [CompletedTurn] = []
     var seenCompletions: [String] = []
@@ -15,11 +25,14 @@ struct LocalData: Codable {
     var labels: [String: String] = [:]
     var importantSessionID: String?
     var quietUntil: Date?
+    var quietStartedAt: Date?
     var quietIndefinitely = false
     var deferredCompletionIDs: [String] = []
+    var reminders: [LocalReminder] = []
+    var deferredReminders: [LocalReminder] = []
 
     init() {}
-    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, importantSessionID, quietUntil, quietIndefinitely, deferredCompletionIDs }
+    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         completions = try c.decodeIfPresent([CompletedTurn].self, forKey: .completions) ?? []
@@ -28,8 +41,11 @@ struct LocalData: Codable {
         labels = try c.decodeIfPresent([String: String].self, forKey: .labels) ?? [:]
         importantSessionID = try c.decodeIfPresent(String.self, forKey: .importantSessionID)
         quietUntil = try c.decodeIfPresent(Date.self, forKey: .quietUntil)
+        quietStartedAt = try c.decodeIfPresent(Date.self, forKey: .quietStartedAt)
         quietIndefinitely = try c.decodeIfPresent(Bool.self, forKey: .quietIndefinitely) ?? false
         deferredCompletionIDs = try c.decodeIfPresent([String].self, forKey: .deferredCompletionIDs) ?? []
+        reminders = try c.decodeIfPresent([LocalReminder].self, forKey: .reminders) ?? []
+        deferredReminders = try c.decodeIfPresent([LocalReminder].self, forKey: .deferredReminders) ?? []
     }
 }
 
@@ -77,22 +93,82 @@ final class LocalStore {
         !isQuiet(now: now) && (data.importantSessionID == nil || data.importantSessionID == sessionID)
     }
     func isQuiet(now: Date = Date()) -> Bool {
-        data.quietIndefinitely || (data.quietUntil.map { $0 > now } ?? false)
+        (data.quietStartedAt.map { now >= $0 } ?? true) &&
+            (data.quietIndefinitely || (data.quietUntil.map { $0 > now } ?? false))
     }
     func beginQuiet(seconds: TimeInterval?, now: Date = Date()) {
-        update { $0.quietIndefinitely = seconds == nil; $0.quietUntil = seconds.map { now.addingTimeInterval($0) } }
+        update { $0.quietIndefinitely = seconds == nil; $0.quietStartedAt = now; $0.quietUntil = seconds.map { now.addingTimeInterval($0) } }
     }
     /// Returns one summary count; viewed results and unselected chats never reappear.
     @discardableResult func endQuiet() -> Int {
-        let count = data.completions.filter {
+        let completionKeys = data.completions.filter {
             data.deferredCompletionIDs.contains($0.id) &&
                 (data.importantSessionID == nil || data.importantSessionID == $0.sessionID)
-        }.count
-        update { $0.quietIndefinitely = false; $0.quietUntil = nil; $0.deferredCompletionIDs.removeAll() }
+        }.map(\.id)
+        let reminderKeys = data.deferredReminders.filter { reminder in
+            if reminder.kind == .result { return data.completions.contains { $0.id == reminder.targetKey } }
+            return data.chats[reminder.sessionID]?.turnID == reminder.turnID &&
+                [.working, .coding, .checking].contains(data.chats[reminder.sessionID]?.state ?? .unknown)
+        }.map(\.targetKey)
+        let count = Set(completionKeys + reminderKeys).count
+        update {
+            $0.quietIndefinitely = false; $0.quietUntil = nil; $0.quietStartedAt = nil
+            $0.deferredCompletionIDs.removeAll(); $0.deferredReminders.removeAll()
+        }
         return count
     }
     func quietExpired(now: Date = Date()) -> Bool {
         !data.quietIndefinitely && (data.quietUntil.map { $0 <= now } ?? false)
+    }
+
+    func remindResult(_ sessionID: String, after seconds: TimeInterval, now: Date = Date()) {
+        guard seconds > 0, let result = data.completions.last(where: { $0.sessionID == sessionID }) else { return }
+        schedule(LocalReminder(id: UUID().uuidString, kind: .result, sessionID: sessionID,
+            turnID: result.turnID, dueAt: now.addingTimeInterval(seconds)))
+    }
+    func watchDuration(_ chat: ChatSummary, threshold: TimeInterval) {
+        guard threshold > 0, let turn = chat.turnID, let start = chat.startedAt,
+              [.working, .coding, .checking].contains(chat.state) else { return }
+        schedule(LocalReminder(id: UUID().uuidString, kind: .duration, sessionID: chat.id,
+            turnID: turn, dueAt: start.addingTimeInterval(threshold)))
+    }
+    private func schedule(_ reminder: LocalReminder) {
+        update {
+            $0.reminders.removeAll { $0.sessionID == reminder.sessionID && $0.kind == reminder.kind }
+            $0.reminders.append(reminder)
+            $0.reminders = Array($0.reminders.suffix(512))
+        }
+    }
+    func cancelReminders(_ sessionID: String) {
+        update {
+            $0.reminders.removeAll { $0.sessionID == sessionID }
+            $0.deferredReminders.removeAll { $0.sessionID == sessionID }
+        }
+    }
+    /// A duration reminder needs a freshly observed matching turn, including after restart.
+    func pollReminders(liveChats: [ChatSummary], now: Date = Date()) -> [LocalReminder] {
+        var due: [LocalReminder] = []
+        var keep: [LocalReminder] = []
+        for reminder in data.reminders {
+            if reminder.kind == .result {
+                guard data.completions.contains(where: { $0.id == reminder.targetKey }) else { continue }
+            } else {
+                guard let chat = liveChats.first(where: { $0.id == reminder.sessionID }) else {
+                    keep.append(reminder); continue
+                }
+                guard chat.turnID == reminder.turnID,
+                      ![.finished, .interrupted, .idle].contains(chat.state) else { continue }
+                guard [.working, .coding, .checking].contains(chat.state) else { keep.append(reminder); continue }
+            }
+            if reminder.dueAt <= now { due.append(reminder) } else { keep.append(reminder) }
+        }
+        guard !due.isEmpty || keep != data.reminders else { return [] }
+        let quiet = isQuiet(now: now) || quietExpired(now: now)
+        update {
+            $0.reminders = keep
+            if quiet { $0.deferredReminders = Array(($0.deferredReminders + due).suffix(512)) }
+        }
+        return quiet ? [] : due
     }
 
     func remember(_ chats: [ChatSummary]) {
