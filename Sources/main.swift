@@ -107,9 +107,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var powerEventsAfter = Date.distantPast
     private var library: LocalStore!
     private var dashboard: DashboardController!
-    private var settings: SettingsController!
+    private var settings: SettingsController?
     private var statistics: TaskStatistics!
-    private var statisticsWindow: StatisticsController!
+    private var statisticsWindow: StatisticsController?
     private var tokenReport = TaskTokenReader.Result.unavailable
     private var tokenReadInFlight = false
     private var lastTokenRead = Date.distantPast
@@ -157,16 +157,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statistics.setEnabled(library.data.statisticsEnabled)
         controller = NotchController()
         dashboard = DashboardController(handler: { [weak self] action in self?.handle(action) })
-        settings = SettingsController(handler: { [weak self] action in self?.handleSettings(action) })
-        statisticsWindow = StatisticsController(provider: { [unowned self] period in self.statisticsSnapshot(period) },
-            action: { [weak self] action in
-                guard let self else { return }
-                switch action {
-                case .openChat(let id): self.handle(.openChat(id)); self.statisticsWindow.hide()
-                case .assignTicket(let id, let ticket): _ = self.statistics.assign(ticket: ticket, to: id)
-                case .reset: self.statistics.reset()
-                }
-            })
         health = HealthController(reportProvider: { [weak self] selfTest in
             let baseReport = IntegrationHealth.check(hooksURL: FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".codex/hooks.json"),
@@ -186,12 +176,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return (IntegrationHealth.Report(checks: baseReport.checks + [nameCheck, powerCheck]), text)
         })
         controller.healthHandler = { [weak self] in self?.showHealth() }
+        controller.settingsHandler = { [weak self] in self?.handle(.openSettings) }
+        controller.statisticsHandler = { [weak self] in self?.handle(.openStatistics) }
         controller.keepAwakeHandler = { [weak self] in self?.handle(.toggleKeepAwake) }
         controller.skinHandler = { [weak self] skin in self?.handle(.selectSkin(skin)) }
         controller.screenSharingHandler = { [weak self] in self?.handle(.toggleSharing) }
         controller.dashboardHandler = { [weak self] in
             guard let self else { return }
-            self.settings.hide()
+            self.settings?.hide()
             self.controller.dismissStateCard()
             if let location = self.controller.dashboardLocation() {
                 self.dashboard.toggle(anchor: location.anchor, screen: location.screen)
@@ -201,7 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if option("--preview") == nil {
             dashboardShortcut = GlobalShortcutController { [weak self] in
                 guard let self else { return }
-                self.settings.hide()
+                self.settings?.hide()
                 self.controller.dismissStateCard()
                 let location = self.controller.dashboardLocation()
                 self.dashboard.showForKeyboard(anchor: location?.anchor, screen: location?.screen)
@@ -248,6 +240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             self?.powerEventsAfter = Date()
                             self?.keepAwake.stop()
                         }
+                        self?.refresh()
                     }
                 })
             }
@@ -256,15 +249,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let path = option("--preview") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                 if option("--preview-scene") == "settings", let self {
+                    _ = self.makeSettings()
                     self.updateSettings()
                     if let location = self.controller.dashboardLocation() {
-                        self.settings.show(anchor: location.anchor, screen: location.screen)
-                    } else { self.settings.show() }
-                    self.settings.capturePreview(to: URL(fileURLWithPath: path))
+                        self.makeSettings().show(anchor: location.anchor, screen: location.screen)
+                    } else { self.makeSettings().show() }
+                    self.makeSettings().capturePreview(to: URL(fileURLWithPath: path))
                 } else if option("--preview-scene") == "statistics", let self {
                     self.populateStatisticsPreview()
-                    self.statisticsWindow.show()
-                    self.statisticsWindow.capturePreview(to: URL(fileURLWithPath: path))
+                    self.makeStatisticsWindow().show()
+                    self.makeStatisticsWindow().capturePreview(to: URL(fileURLWithPath: path))
                 } else if arguments.contains("--preview-dashboard") {
                     self?.populatePreview()
                     if let self, let location = self.controller.dashboardLocation() {
@@ -408,7 +402,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func configureHeartbeat() {
         // Events wake us immediately. Timers only age state, service reminders and
         // renew the bounded idle-sleep lease; sleeping displays need no UI ticks.
-        let interval: TimeInterval = !displaySleeping && (dashboard.isVisible || settings.isVisible || statisticsWindow.isVisible) ? 1
+        let interval: TimeInterval = !displaySleeping && (dashboard.isVisible || settings?.isVisible == true || statisticsWindow?.isVisible == true) ? 1
             : (!displaySleeping && model.snapshot().activeCount > 0 ? 5 : 30)
         if option("--preview") == nil { spoolWatcher?.start() }
         guard heartbeatInterval != interval else { return }
@@ -437,7 +431,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             library.update { $0.screenSharing.toggle() }
             health.hide()
             dashboard.setScreenSharing(library.data.screenSharing)
-            statisticsWindow.refresh()
+            statisticsWindow?.refresh()
         case .archive(let id): library.archive(id, liveChat: model.chatSummaries().first { $0.id == id })
         case .restoreArchive(let id): library.restoreArchive(id)
         case .toggleGroupSelection(let id):
@@ -466,7 +460,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let changed = dashboardShortcut.configure(value)
                 updateShortcutStatus()
                 if !changed {
-                    settings.showFeedback(dashboardShortcut.error ?? "Сочетание занято · выбери другое")
+                    settings?.showFeedback(dashboardShortcut.error ?? "Сочетание занято · выбери другое")
                 }
             }
         case .copyAttentionInstruction:
@@ -481,7 +475,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateSettings()
     }
 
+    private func makeSettings() -> SettingsController {
+        if let settings { return settings }
+        let value = SettingsController(handler: { [weak self] action in self?.handleSettings(action) })
+        settings = value
+        return value
+    }
+
+    private func makeStatisticsWindow() -> StatisticsController {
+        if let statisticsWindow { return statisticsWindow }
+        let value = StatisticsController(provider: { [unowned self] period in self.statisticsSnapshot(period) },
+            action: { [weak self] action in
+                guard let self else { return }
+                switch action {
+                case .openChat(let id): self.handle(.openChat(id)); self.statisticsWindow?.hide()
+                case .assignTicket(let id, let ticket): _ = self.statistics.assign(ticket: ticket, to: id)
+                case .reset: self.statistics.reset()
+                }
+            })
+        statisticsWindow = value
+        return value
+    }
+
     private func showSettings() {
+        let settings = makeSettings()
         dashboard.hide()
         controller.dismissStateCard()
         updateSettings()
@@ -492,9 +509,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showHealth() {
         if library.data.screenSharing {
-            if settings.isVisible { settings.showFeedback("Для диагностики выключи скрытие названий") }
+            if settings?.isVisible == true { settings?.showFeedback("Для диагностики выключи скрытие названий") }
             else { dashboard.showFeedback("Для диагностики выключи режим демонстрации") }
-        } else { settings.hide(); dashboard.hide(); health.show() }
+        } else { settings?.hide(); dashboard.hide(); health.show() }
     }
 
     private func handleSettings(_ action: SettingsAction) {
@@ -510,7 +527,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statistics.setEnabled(library.data.statisticsEnabled)
             if !library.data.statisticsEnabled { tokenReport = .unavailable }
             lastTokenRead = .distantPast
-            statisticsWindow.refresh()
+            statisticsWindow?.refresh()
         case .openStatistics: showStatistics()
         case .openHealth: showHealth()
         case .quit: NSApplication.shared.terminate(nil); return
@@ -519,6 +536,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateSettings() {
+        guard let settings else { return }
         let blocked = !keepAwakeQuestions.blockedSessionIDs.isEmpty || library.data.attention.values.contains { $0.kind == .question }
         let powerText = keepAwake.status == .waiting && blocked ? "Ожидается твой ответ · сон разрешён" : keepAwake.statusText
         settings.update(SettingsPreferences(skin: CharacterSkin(savedValue: option("--skin") ?? library.data.characterSkin),
@@ -648,8 +666,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showStatistics() {
+        let statisticsWindow = makeStatisticsWindow()
         dashboard.hide()
-        settings.hide()
+        settings?.hide()
         controller.dismissStateCard()
         lastTokenRead = .distantPast
         statisticsWindow.show()
@@ -657,10 +676,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshStatistics(force: Bool = false) {
-        guard !displaySleeping, statisticsWindow.isVisible else { return }
+        guard !displaySleeping, statisticsWindow?.isVisible == true else { return }
         if force || Date().timeIntervalSince(lastStatisticsRender) >= 5 {
             lastStatisticsRender = Date()
-            if force { statisticsWindow.refresh() } else { statisticsWindow.refreshIfVisible() }
+            if force { statisticsWindow?.refresh() } else { statisticsWindow?.refreshIfVisible() }
         }
         guard option("--preview") == nil, library.data.statisticsEnabled, !tokenReadInFlight,
               force || Date().timeIntervalSince(lastTokenRead) >= 15 else { return }
@@ -673,7 +692,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 self.tokenReadInFlight = false
                 if self.library.data.statisticsEnabled { self.tokenReport = report }
-                self.statisticsWindow.refreshIfVisible()
+                self.statisticsWindow?.refreshIfVisible()
             }
         }
     }
@@ -700,7 +719,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard option("--preview") == nil, !displaySleeping, !nameReadInFlight else { return }
         let ids = Array(sessionIDs.prefix(512))
         let membership = ids.sorted()
-        let interval: TimeInterval = dashboard.isVisible || statisticsWindow.isVisible ? 5 : 30
+        let interval: TimeInterval = dashboard.isVisible || statisticsWindow?.isVisible == true ? 5 : 30
         guard membership != lastNameIDs || Date().timeIntervalSince(lastNameRead) >= interval else { return }
         lastNameIDs = membership
         lastNameRead = Date()

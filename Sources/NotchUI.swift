@@ -7,6 +7,8 @@ final class NotchController: NSObject, NSMenuDelegate {
     var demoHandler: ((CompanionState) -> Void)?
     var healthHandler: (() -> Void)?
     var dashboardHandler: (() -> Void)?
+    var settingsHandler: (() -> Void)?
+    var statisticsHandler: (() -> Void)?
     var liveHandler: (() -> Void)?
     var acknowledgeHandler: ((String?) -> Void)?
     var keepAwakeHandler: (() -> Void)?
@@ -520,6 +522,8 @@ final class NotchController: NSObject, NSMenuDelegate {
         menu.addItem(presentation)
         menu.addItem(item("Проверить подключение…", action: #selector(openHealth)))
         menu.addItem(item("Чаты и результаты…", action: #selector(openDashboard)))
+        menu.addItem(item("Статистика задач…", action: #selector(openStatistics)))
+        menu.addItem(item("Настройки…", action: #selector(openSettings)))
         menu.addItem(item("Показать состояние", action: #selector(revealState)))
         let skins = NSMenu()
         for skin in CharacterSkin.allCases {
@@ -627,6 +631,8 @@ final class NotchController: NSObject, NSMenuDelegate {
     @objc private func openHealth() { healthHandler?() }
 
     @objc private func openDashboard() { dashboardHandler?() }
+    @objc private func openSettings() { settingsHandler?() }
+    @objc private func openStatistics() { statisticsHandler?() }
 
     @objc private func acknowledgeResults() { acknowledgeHandler?(nil) }
 
