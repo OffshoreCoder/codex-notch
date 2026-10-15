@@ -286,7 +286,8 @@ private final class StatisticsGroup: NSView {
         let stack = NSStackView(); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 0
         let title = NSTextField(labelWithString: group.title)
         title.font = .monospacedSystemFont(ofSize: 12, weight: .semibold); title.textColor = .systemTeal
-        let total = NSTextField(labelWithString: TaskStatistics.durationText(group.duration) + "  ·  " + TaskStatistics.tokenText(group.tokens) + " ток.")
+        let coverage = group.tokenCoverage < group.chats.count ? " · \(group.tokenCoverage)/\(group.chats.count) чатов" : ""
+        let total = NSTextField(labelWithString: TaskStatistics.durationText(group.duration) + "  ·  " + TaskStatistics.tokenText(group.tokens) + " ток." + coverage)
         total.font = .monospacedSystemFont(ofSize: 11, weight: .medium); total.textColor = .secondaryLabelColor
         let heading = NSStackView(views: [title, NSView(), total]); heading.spacing = 8
         stack.addArrangedSubview(heading)
