@@ -32,6 +32,8 @@ struct DashboardEntry: Equatable {
 
 enum DashboardAction {
     case openChat(String)
+    case openSettings
+    case openStatistics
     case openAttachment(String)
     case toggleGroupSelection(String)
     case archive(String)
@@ -81,17 +83,12 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
     private let panel: DashboardPanel
     private let rows = NSStackView()
     private let search = NSSearchField()
-    private let shortcutButton = NSPopUpButton(frame: .zero, pullsDown: true)
-    private var shortcut: GlobalShortcut = .standard
     private var selectedID: String?
     private let chatCount = NSTextField(labelWithString: "")
     private let runningCount = NSTextField(labelWithString: "")
     private let attentionCount = NSTextField(labelWithString: "")
     private let completedCount = NSTextField(labelWithString: "")
     private let focusStatus = NSTextField(labelWithString: "Все чаты могут уведомлять")
-    private let keepAwakeButton = NSButton(checkboxWithTitle: "Не усыплять Mac во время работы", target: nil, action: nil)
-    private let keepAwakeStatus = NSTextField(labelWithString: "")
-    private let keepAwakeLimit = NSTextField(wrappingLabelWithString: "Экран может гаснуть. Закрытие крышки всё ещё может усыпить Mac.")
     private let quietButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private var groupControls: NSStackView?
     private let groupStatus = NSTextField(labelWithString: "Выбери ходы в меню ••• у чатов")
@@ -107,7 +104,6 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
     private var renderedEntries: [DashboardEntry] = []
     private var rowViews: [DashboardRow] = []
     private var sharing = false
-    private let skinButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private let sharingButton = NSButton(image: NSImage(systemSymbolName: "eye.slash", accessibilityDescription: "Режим демонстрации") ?? NSImage(), target: nil, action: nil)
     private let privacyLabel = NSTextField(labelWithString: "Без чтения переписки")
     private var feedbackTimer: Timer?
@@ -154,21 +150,13 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
         sharingButton.contentTintColor = DashboardPalette.secondary
         sharingButton.toolTip = "Режим демонстрации: скрыть названия и пути здесь"
         sharingButton.setAccessibilityLabel("Режим демонстрации")
-        skinButton.addItem(withTitle: "Скин")
-        skinButton.controlSize = .small
-        skinButton.font = .systemFont(ofSize: 11, weight: .medium)
-        skinButton.setAccessibilityLabel("Скин персонажа")
-        skinButton.toolTip = "Выбрать персонажа у выреза и в значке меню"
-        skinButton.menu?.autoenablesItems = false
-        skinButton.menu?.delegate = self
-        for skin in CharacterSkin.allCases {
-            let item = NSMenuItem(title: skin.title, action: #selector(selectSkin(_:)), keyEquivalent: "")
-            item.representedObject = skin.rawValue
-            item.toolTip = skin.detail
-            item.target = self
-            skinButton.menu?.addItem(item)
-        }
-        let heading = NSStackView(views: [title, chatCount, Self.spacer(), skinButton, sharingButton, close])
+        let settings = NSButton(image: NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Настройки") ?? NSImage(),
+                                target: self, action: #selector(openSettings))
+        settings.isBordered = false
+        settings.contentTintColor = DashboardPalette.secondary
+        settings.toolTip = "Настройки персонажа, горячей клавиши и статистики"
+        settings.setAccessibilityLabel("Настройки Codex Notch")
+        let heading = NSStackView(views: [title, chatCount, Self.spacer(), sharingButton, settings, close])
         heading.spacing = 10
         close.widthAnchor.constraint(equalToConstant: 24).isActive = true
         close.heightAnchor.constraint(equalToConstant: 24).isActive = true
@@ -235,31 +223,11 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
         groupControls.spacing = 8
         groupControls.isHidden = true
         self.groupControls = groupControls
-        keepAwakeButton.target = self
-        keepAwakeButton.action = #selector(toggleKeepAwake)
-        keepAwakeButton.controlSize = .small
-        keepAwakeButton.font = .systemFont(ofSize: 11, weight: .medium)
-        keepAwakeButton.contentTintColor = DashboardPalette.text
-        keepAwakeButton.toolTip = "Удерживает только автоматический сон, пока есть свежие активные ходы. Экран может гаснуть. Крышка, ручной Сон и низкий заряд по правилам macOS. Для закрытой крышки нужен внешний монитор и питание. На батарее расход увеличится."
-        keepAwakeButton.setAccessibilityLabel("Не усыплять Mac во время работы")
-        configureMetadata(keepAwakeStatus)
-        keepAwakeLimit.font = .systemFont(ofSize: 10)
-        keepAwakeLimit.textColor = DashboardPalette.secondary
-        keepAwakeLimit.maximumNumberOfLines = 2
-        keepAwakeLimit.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        keepAwakeStatus.isHidden = true
-        keepAwakeLimit.isHidden = true
-        let powerControls = NSStackView(views: [keepAwakeButton, keepAwakeStatus, keepAwakeLimit])
-        powerControls.orientation = .vertical
-        powerControls.alignment = .leading
-        powerControls.spacing = 4
-        keepAwakeStatus.widthAnchor.constraint(equalTo: powerControls.widthAnchor).isActive = true
-        keepAwakeLimit.widthAnchor.constraint(equalTo: powerControls.widthAnchor).isActive = true
-        let top = NSStackView(views: [heading, counts, search, filterControl, focusControls, quietStatus, groupControls, powerControls])
+        let top = NSStackView(views: [heading, counts, search, filterControl, focusControls, quietStatus, groupControls])
         top.orientation = .vertical
         top.alignment = .leading
         top.spacing = 8
-        [heading, counts, search, filterControl, focusControls, quietStatus, groupControls, powerControls].forEach {
+        [heading, counts, search, filterControl, focusControls, quietStatus, groupControls].forEach {
             $0.widthAnchor.constraint(equalTo: top.widthAnchor).isActive = true
         }
         let divider = NSBox()
@@ -282,20 +250,14 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
         instruction.toolTip = "Скопировать инструкцию в нужный чат. Сигнал появляется только после явной команды; проверка разрешений сама по себе его не включает."
         privacyLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
         privacyLabel.textColor = DashboardPalette.dim
-        shortcutButton.addItem(withTitle: shortcut.title)
-        shortcutButton.controlSize = .small
-        shortcutButton.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
-        shortcutButton.menu?.autoenablesItems = false
-        shortcutButton.menu?.delegate = self
-        for (title, tag) in [("⌃⌥Пробел · по умолчанию", 0), ("⇧⌘Пробел", 1),
-                              ("Другое сочетание…", 2), ("Выключить", 3)] {
-            let item = NSMenuItem(title: title, action: #selector(configureShortcut(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = tag
-            shortcutButton.menu?.addItem(item)
-        }
-        shortcutButton.setAccessibilityLabel("Сочетание клавиш для пульта")
-        let footer = NSStackView(views: [instruction, shortcutButton, Self.spacer(), privacyLabel])
+        let statistics = NSButton(title: "Статистика", target: self, action: #selector(openStatistics))
+        statistics.image = NSImage(systemSymbolName: "chart.bar.xaxis", accessibilityDescription: nil)
+        statistics.imagePosition = .imageLeading
+        statistics.bezelStyle = .rounded
+        statistics.controlSize = .small
+        statistics.font = .systemFont(ofSize: 11)
+        statistics.toolTip = "Время и токены по задачам на этом Mac"
+        let footer = NSStackView(views: [statistics, instruction, Self.spacer(), privacyLabel])
         footer.spacing = 8
         [top, divider, scroll, footer].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
@@ -330,27 +292,6 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
         feedbackTimer?.invalidate()
         if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
         if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
-    }
-
-    func updateKeepAwake(enabled: Bool, status: String, active: Bool, failed: Bool, detail: String?) {
-        keepAwakeButton.state = enabled ? .on : .off
-        keepAwakeStatus.stringValue = failed && !enabled ? "Выключено · предупреждение IOKit" : status
-        keepAwakeStatus.toolTip = detail ?? status
-        keepAwakeStatus.textColor = failed ? DashboardPalette.amber : active ? DashboardPalette.green : DashboardPalette.dim
-        keepAwakeStatus.isHidden = !enabled && !failed
-        keepAwakeLimit.isHidden = !enabled
-    }
-    @objc private func toggleKeepAwake() { handler(.toggleKeepAwake) }
-
-    func updateSkin(_ skin: CharacterSkin) {
-        for item in skinButton.menu?.items ?? [] {
-            item.state = (item.representedObject as? String) == skin.rawValue ? .on : .off
-        }
-        skinButton.setAccessibilityValue(skin.title)
-    }
-    @objc private func selectSkin(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let skin = CharacterSkin(rawValue: raw) else { return }
-        handler(.selectSkin(skin))
     }
 
     /// Routine feedback must never start a modal event loop or block the dashboard.
@@ -439,17 +380,6 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
         panel.makeFirstResponder(search)
     }
 
-    func updateShortcut(_ value: GlobalShortcut, enabled: Bool, error: String?) {
-        shortcut = value
-        shortcutButton.item(at: 0)?.title = enabled && error == nil ? value.title : "Клавиши…"
-        shortcutButton.toolTip = error ?? (enabled ? "Открыть пульт: \(value.title). ↑ ↓ выбрать чат, Enter открыть." : "Настроить горячую клавишу")
-        for item in shortcutButton.menu?.items ?? [] {
-            item.state = ((item.tag == 0 && enabled && value == .standard) ||
-                          (item.tag == 1 && enabled && value == .alternate) ||
-                          (item.tag == 3 && !enabled)) ? .on : .off
-        }
-    }
-
     func hide() {
         guard !isRenaming else { return }
         panel.orderOut(nil)
@@ -528,6 +458,8 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
     }
 
     @objc private func closePanel() { hide() }
+    @objc private func openSettings() { handler(.openSettings) }
+    @objc private func openStatistics() { handler(.openStatistics) }
     @objc private func changeFilter() {
         filter = Filter(rawValue: filterControl.selectedSegment) ?? .all
         renderEntries()
@@ -568,35 +500,6 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
 
     private func updateSelection() {
         for (row, entry) in zip(rowViews, renderedEntries) { row.setSelected(entry.id == selectedID) }
-    }
-
-    @objc private func configureShortcut(_ sender: NSMenuItem) {
-        switch sender.tag {
-        case 0: handler(.configureShortcut(.standard))
-        case 1: handler(.configureShortcut(.alternate))
-        case 3: handler(.configureShortcut(nil))
-        default:
-            let alert = NSAlert()
-            alert.window.appearance = NSAppearance(named: .darkAqua)
-            alert.messageText = "Сочетание для открытия пульта"
-            alert.informativeText = "Нажми сочетание с ⌃, ⌥ или ⌘. Оно работает через системную регистрацию macOS и не требует Accessibility."
-            alert.addButton(withTitle: "Сохранить")
-            alert.addButton(withTitle: "Отмена")
-            let recorder = ShortcutRecorder(frame: NSRect(x: 0, y: 0, width: 340, height: 48))
-            recorder.shortcut = shortcut
-            alert.accessoryView = recorder
-            alert.window.initialFirstResponder = recorder
-            isRenaming = true
-            alert.beginSheetModal(for: panel) { [weak self] response in
-                guard let self else { return }
-                self.isRenaming = false
-                if response == .alertFirstButtonReturn, let value = recorder.shortcut {
-                    self.handler(.configureShortcut(value))
-                }
-                self.renderEntries()
-                self.panel.makeFirstResponder(self.search)
-            }
-        }
     }
 
     private func renderEntries() {
@@ -1020,29 +923,5 @@ private extension NSColor {
         self.init(calibratedRed: CGFloat((hex >> 16) & 255) / 255,
                   green: CGFloat((hex >> 8) & 255) / 255,
                   blue: CGFloat(hex & 255) / 255, alpha: 1)
-    }
-}
-
-/// Receives keys only while this app's explicit shortcut sheet owns first responder.
-@MainActor
-private final class ShortcutRecorder: NSView {
-    var shortcut: GlobalShortcut? { didSet { needsDisplay = true } }
-    private var hint = "Нажми новое сочетание"
-    override var acceptsFirstResponder: Bool { true }
-    override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 { super.keyDown(with: event); return }
-        if let value = GlobalShortcut.captured(from: event) {
-            shortcut = value
-            hint = "Сохранить новое сочетание"
-        } else { hint = "Добавь ⌃, ⌥ или ⌘ к клавише" }
-        needsDisplay = true
-    }
-    override func draw(_ dirtyRect: NSRect) {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        let text = "\(shortcut?.title ?? "…")\n\(hint)"
-        (text as NSString).draw(in: bounds.insetBy(dx: 4, dy: 4), withAttributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .medium),
-            .foregroundColor: DashboardPalette.text, .paragraphStyle: paragraph])
     }
 }

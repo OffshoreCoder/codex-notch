@@ -107,6 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var powerEventsAfter = Date.distantPast
     private var library: LocalStore!
     private var dashboard: DashboardController!
+    private var settings: SettingsController!
     private var statistics: TaskStatistics!
     private var statisticsWindow: StatisticsController!
     private var tokenReport = TaskTokenReader.Result.unavailable
@@ -156,6 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statistics.setEnabled(library.data.statisticsEnabled)
         controller = NotchController()
         dashboard = DashboardController(handler: { [weak self] action in self?.handle(action) })
+        settings = SettingsController(handler: { [weak self] action in self?.handleSettings(action) })
         statisticsWindow = StatisticsController(provider: { [unowned self] period in self.statisticsSnapshot(period) },
             action: { [weak self] action in
                 guard let self else { return }
@@ -183,20 +185,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 status: power?.status == .failed || power?.lastError != nil ? .warning : .ok)
             return (IntegrationHealth.Report(checks: baseReport.checks + [nameCheck, powerCheck]), text)
         })
-        controller.healthHandler = { [weak self] in
-            guard let self else { return }
-            if self.library.data.screenSharing {
-                let alert = NSAlert()
-                alert.messageText = "Диагностика содержит локальные пути"
-                alert.informativeText = "Для просмотра выключи режим демонстрации."
-                alert.runModal()
-            } else { self.health.show() }
-        }
+        controller.healthHandler = { [weak self] in self?.showHealth() }
         controller.keepAwakeHandler = { [weak self] in self?.handle(.toggleKeepAwake) }
         controller.skinHandler = { [weak self] skin in self?.handle(.selectSkin(skin)) }
         controller.screenSharingHandler = { [weak self] in self?.handle(.toggleSharing) }
         controller.dashboardHandler = { [weak self] in
             guard let self else { return }
+            self.settings.hide()
             self.controller.dismissStateCard()
             if let location = self.controller.dashboardLocation() {
                 self.dashboard.toggle(anchor: location.anchor, screen: location.screen)
@@ -206,6 +201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if option("--preview") == nil {
             dashboardShortcut = GlobalShortcutController { [weak self] in
                 guard let self else { return }
+                self.settings.hide()
                 self.controller.dismissStateCard()
                 let location = self.controller.dashboardLocation()
                 self.dashboard.showForKeyboard(anchor: location?.anchor, screen: location?.screen)
@@ -259,7 +255,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refresh()
         if let path = option("--preview") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                if option("--preview-scene") == "statistics", let self {
+                if option("--preview-scene") == "settings", let self {
+                    self.updateSettings()
+                    if let location = self.controller.dashboardLocation() {
+                        self.settings.show(anchor: location.anchor, screen: location.screen)
+                    } else { self.settings.show() }
+                    self.settings.capturePreview(to: URL(fileURLWithPath: path))
+                } else if option("--preview-scene") == "statistics", let self {
                     self.populateStatisticsPreview()
                     self.statisticsWindow.show()
                     self.statisticsWindow.capturePreview(to: URL(fileURLWithPath: path))
@@ -380,8 +382,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             liveChats: liveChats, blockedSessionIDs: blocked)
         let awakeText = keepAwake.status == .waiting && !blocked.isEmpty ? "Ожидается твой ответ · сон разрешён" : keepAwake.statusText
         controller.setKeepAwake(enabled: library.data.keepAwakeEnabled, status: awakeText)
-        dashboard.updateKeepAwake(enabled: library.data.keepAwakeEnabled, status: awakeText,
-            active: keepAwake.status == .active, failed: keepAwake.status == .failed || keepAwake.lastError != nil, detail: keepAwake.lastError)
         let live = model.snapshot()
         let attention = library.data.attention.values.sorted { $0.requestedAt > $1.requestedAt }.first
         let attentionSnapshot = attention.map {
@@ -395,7 +395,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let skin = CharacterSkin(savedValue: option("--skin") ?? library.data.characterSkin)
         controller.setSkin(skin)
         controller.setHeadphoneAccessory(enabled: library.data.headphoneAccessoryEnabled)
-        dashboard.updateSkin(skin)
+        updateSettings()
         controller.update(snapshot)
         controller.updateQueue(library.data.completions, error: library.error,
             pendingCount: Set(library.data.completions.map(\.id) + Array(library.data.attention.keys) + library.data.reviewingIDs).count,
@@ -408,7 +408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func configureHeartbeat() {
         // Events wake us immediately. Timers only age state, service reminders and
         // renew the bounded idle-sleep lease; sleeping displays need no UI ticks.
-        let interval: TimeInterval = !displaySleeping && (dashboard.isVisible || statisticsWindow.isVisible) ? 1
+        let interval: TimeInterval = !displaySleeping && (dashboard.isVisible || settings.isVisible || statisticsWindow.isVisible) ? 1
             : (!displaySleeping && model.snapshot().activeCount > 0 ? 5 : 30)
         if option("--preview") == nil { spoolWatcher?.start() }
         guard heartbeatInterval != interval else { return }
@@ -424,6 +424,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handle(_ action: DashboardAction) {
         switch action {
+        case .openSettings: showSettings()
+        case .openStatistics: showStatistics()
         case .openChat(let id):
             if controller.openChat(id) {
                 library.openChat(id)
@@ -435,6 +437,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             library.update { $0.screenSharing.toggle() }
             health.hide()
             dashboard.setScreenSharing(library.data.screenSharing)
+            statisticsWindow.refresh()
         case .archive(let id): library.archive(id, liveChat: model.chatSummaries().first { $0.id == id })
         case .restoreArchive(let id): library.restoreArchive(id)
         case .toggleGroupSelection(let id):
@@ -447,10 +450,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let result = library.data.results[key], let path = result.path, let valid = ResultSignal.safePath(path) {
                 if NSWorkspace.shared.open(URL(fileURLWithPath: valid)) { library.markOpened(key); dashboard.hide() }
             } else {
-                let alert = NSAlert()
-                alert.messageText = "Файл результата недоступен"
-                alert.informativeText = "Файл мог переместиться. Открой чат, чтобы уточнить результат."
-                alert.runModal()
+                dashboard.showFeedback("Файл недоступен · открой чат, чтобы уточнить результат")
             }
         case .acknowledgeChat(let id): library.acknowledgeChat(id)
         case .rename(let id, let name): library.rename(id, to: name == codexNames[id.lowercased()] ? "" : name)
@@ -466,11 +466,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let changed = dashboardShortcut.configure(value)
                 updateShortcutStatus()
                 if !changed {
-                    let alert = NSAlert()
-                    alert.messageText = "Сочетание недоступно"
-                    alert.informativeText = dashboardShortcut.error ?? "Выбери другое сочетание клавиш."
-                    alert.addButton(withTitle: "Понятно")
-                    alert.runModal()
+                    settings.showFeedback(dashboardShortcut.error ?? "Сочетание занято · выбери другое")
                 }
             }
         case .copyAttentionInstruction:
@@ -482,9 +478,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateShortcutStatus() {
-        guard let dashboardShortcut else { return }
-        dashboard.updateShortcut(dashboardShortcut.shortcut, enabled: dashboardShortcut.isEnabled,
-                                 error: dashboardShortcut.error)
+        updateSettings()
+    }
+
+    private func showSettings() {
+        dashboard.hide()
+        controller.dismissStateCard()
+        updateSettings()
+        if let location = controller.dashboardLocation() {
+            settings.show(anchor: location.anchor, screen: location.screen)
+        } else { settings.show() }
+    }
+
+    private func showHealth() {
+        if library.data.screenSharing {
+            if settings.isVisible { settings.showFeedback("Для диагностики выключи скрытие названий") }
+            else { dashboard.showFeedback("Для диагностики выключи режим демонстрации") }
+        } else { settings.hide(); dashboard.hide(); health.show() }
+    }
+
+    private func handleSettings(_ action: SettingsAction) {
+        switch action {
+        case .selectSkin(let skin): handle(.selectSkin(skin))
+        case .toggleSharing: handle(.toggleSharing)
+        case .toggleKeepAwake: handle(.toggleKeepAwake)
+        case .configureShortcut(let shortcut): handle(.configureShortcut(shortcut))
+        case .toggleHeadphoneAccessory:
+            library.update { $0.headphoneAccessoryEnabled.toggle() }
+        case .toggleStatistics:
+            library.update { $0.statisticsEnabled.toggle() }
+            statistics.setEnabled(library.data.statisticsEnabled)
+            if !library.data.statisticsEnabled { tokenReport = .unavailable }
+            lastTokenRead = .distantPast
+            statisticsWindow.refresh()
+        case .openStatistics: showStatistics()
+        case .openHealth: showHealth()
+        case .quit: NSApplication.shared.terminate(nil); return
+        }
+        refresh()
+    }
+
+    private func updateSettings() {
+        let blocked = !keepAwakeQuestions.blockedSessionIDs.isEmpty || library.data.attention.values.contains { $0.kind == .question }
+        let powerText = keepAwake.status == .waiting && blocked ? "Ожидается твой ответ · сон разрешён" : keepAwake.statusText
+        settings.update(SettingsPreferences(skin: CharacterSkin(savedValue: option("--skin") ?? library.data.characterSkin),
+            screenSharing: library.data.screenSharing, keepAwakeEnabled: library.data.keepAwakeEnabled,
+            headphoneAccessoryEnabled: library.data.headphoneAccessoryEnabled, statisticsEnabled: library.data.statisticsEnabled,
+            shortcut: dashboardShortcut?.shortcut ?? .standard, shortcutEnabled: dashboardShortcut?.isEnabled ?? true,
+            shortcutError: dashboardShortcut?.error, energyStatus: "Адаптивная анимация · локальные события",
+            powerStatus: powerText, powerActive: keepAwake.status == .active,
+            powerFailed: keepAwake.status == .failed || keepAwake.lastError != nil, powerDetail: keepAwake.lastError,
+            version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.0"))
     }
 
     private func finishQuiet() {
@@ -575,11 +619,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var names = codexNames
         for (id, name) in library.data.labels { names[id] = name }
         return statistics.snapshot(period: period, names: names, tokens: tokenReport,
-            knownSessionIDs: Array(library.data.chats.keys), masked: library.data.screenSharing)
+            knownSessionIDs: Array(library.data.chats.keys), masked: library.data.screenSharing,
+            now: option("--preview-scene") == "statistics" ? statisticsPreviewDate : Date())
+    }
+
+    private var statisticsPreviewDate: Date {
+        Calendar.current.startOfDay(for: Date()).addingTimeInterval(15 * 3600)
     }
 
     private func populateStatisticsPreview() {
-        let now = Date()
+        let now = statisticsPreviewDate
         let first = "11111111-1111-4111-8111-111111111111"
         let second = "22222222-2222-4222-8222-222222222222"
         let third = "33333333-3333-4333-8333-333333333333"
@@ -600,6 +649,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showStatistics() {
         dashboard.hide()
+        settings.hide()
         controller.dismissStateCard()
         lastTokenRead = .distantPast
         statisticsWindow.show()
@@ -709,9 +759,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         dashboard.setScreenSharing(sharing)
         dashboard.update(entries: entries)
-        if scene == "awake" {
-            dashboard.updateKeepAwake(enabled: true, status: "Демо: Mac не уснёт от бездействия · чатов: 1", active: true, failed: false, detail: nil)
-        }
         dashboard.updateQuiet(status: scene == "group" ? "Тишина ещё 18 мин" : "Уведомления включены", active: scene == "group")
         dashboard.updateGroup(text: scene == "group" ? "Завершены 2 из 3" : nil, selectedCount: 0, hasGroup: scene == "group")
     }
