@@ -117,6 +117,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refresh() {
+        if library.quietExpired() { finishQuiet() }
+        controller.setQuiet(library.isQuiet())
         if option("--preview") == nil {
             let events = spool.drain()
             for event in events {
@@ -151,11 +153,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .acknowledgeChat(let id): library.acknowledgeChat(id)
         case .rename(let id, let name): library.rename(id, to: name)
         case .important(let id): library.selectImportant(id)
+        case .quiet(let seconds): library.beginQuiet(seconds: seconds)
+        case .endQuiet: finishQuiet()
         }
         refresh()
     }
 
+    private func finishQuiet() {
+        let count = library.endQuiet()
+        controller.setQuiet(false)
+        if count > 0 { controller.notify(title: "Ждут просмотра: \(count)") }
+    }
+
     private func updateDashboard() {
+        let quietText = library.data.quietIndefinitely ? "Тишина до выключения" : library.data.quietUntil.map {
+            "Тишина ещё " + Self.duration($0.timeIntervalSinceNow)
+        } ?? "Уведомления включены"
+        dashboard.updateQuiet(status: quietText, active: library.isQuiet())
         let live = Dictionary(uniqueKeysWithValues: model.chatSummaries().map { ($0.id, $0) })
         var all = library.data.chats
         for result in library.data.completions where all[result.sessionID] == nil {

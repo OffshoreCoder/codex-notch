@@ -14,9 +14,12 @@ struct LocalData: Codable {
     var chats: [String: ChatSummary] = [:]
     var labels: [String: String] = [:]
     var importantSessionID: String?
+    var quietUntil: Date?
+    var quietIndefinitely = false
+    var deferredCompletionIDs: [String] = []
 
     init() {}
-    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, importantSessionID }
+    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, importantSessionID, quietUntil, quietIndefinitely, deferredCompletionIDs }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         completions = try c.decodeIfPresent([CompletedTurn].self, forKey: .completions) ?? []
@@ -24,6 +27,9 @@ struct LocalData: Codable {
         chats = try c.decodeIfPresent([String: ChatSummary].self, forKey: .chats) ?? [:]
         labels = try c.decodeIfPresent([String: String].self, forKey: .labels) ?? [:]
         importantSessionID = try c.decodeIfPresent(String.self, forKey: .importantSessionID)
+        quietUntil = try c.decodeIfPresent(Date.self, forKey: .quietUntil)
+        quietIndefinitely = try c.decodeIfPresent(Bool.self, forKey: .quietIndefinitely) ?? false
+        deferredCompletionIDs = try c.decodeIfPresent([String].self, forKey: .deferredCompletionIDs) ?? []
     }
 }
 
@@ -53,9 +59,11 @@ final class LocalStore {
         }
     }
 
-    @discardableResult func record(_ completion: CompletedTurn) -> Bool {
+    @discardableResult func record(_ completion: CompletedTurn, now: Date = Date()) -> Bool {
         guard !data.seenCompletions.contains(completion.id) else { return false }
+        let quiet = isQuiet(now: now)
         update {
+            if quiet { $0.deferredCompletionIDs = Array(($0.deferredCompletionIDs + [completion.id]).suffix(512)) }
             $0.completions.append(completion)
             $0.completions = Array($0.completions.suffix(512))
             $0.seenCompletions.append(completion.id)
@@ -65,8 +73,26 @@ final class LocalStore {
     }
 
     func selectImportant(_ sessionID: String?) { update { $0.importantSessionID = sessionID } }
-    func shouldNotify(_ sessionID: String) -> Bool {
-        data.importantSessionID == nil || data.importantSessionID == sessionID
+    func shouldNotify(_ sessionID: String, now: Date = Date()) -> Bool {
+        !isQuiet(now: now) && (data.importantSessionID == nil || data.importantSessionID == sessionID)
+    }
+    func isQuiet(now: Date = Date()) -> Bool {
+        data.quietIndefinitely || (data.quietUntil.map { $0 > now } ?? false)
+    }
+    func beginQuiet(seconds: TimeInterval?, now: Date = Date()) {
+        update { $0.quietIndefinitely = seconds == nil; $0.quietUntil = seconds.map { now.addingTimeInterval($0) } }
+    }
+    /// Returns one summary count; viewed results and unselected chats never reappear.
+    @discardableResult func endQuiet() -> Int {
+        let count = data.completions.filter {
+            data.deferredCompletionIDs.contains($0.id) &&
+                (data.importantSessionID == nil || data.importantSessionID == $0.sessionID)
+        }.count
+        update { $0.quietIndefinitely = false; $0.quietUntil = nil; $0.deferredCompletionIDs.removeAll() }
+        return count
+    }
+    func quietExpired(now: Date = Date()) -> Bool {
+        !data.quietIndefinitely && (data.quietUntil.map { $0 <= now } ?? false)
     }
 
     func remember(_ chats: [ChatSummary]) {

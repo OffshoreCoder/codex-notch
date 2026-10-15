@@ -10,6 +10,7 @@ final class NotchController: NSObject, NSMenuDelegate {
     var acknowledgeHandler: ((String?) -> Void)?
     private var completions: [CompletedTurn] = []
     private var queueError: String?
+    private var quiet = false
     private var noticeSessionID: String?
 
     private let panel: CompanionPanel
@@ -120,7 +121,14 @@ final class NotchController: NSObject, NSMenuDelegate {
         companionView.needsDisplay = true
     }
 
+    func setQuiet(_ active: Bool) {
+        quiet = active
+        if active { attentionUntil = .distantPast; companionView.notice = nil; noticeSessionID = nil }
+        refreshExpansion()
+    }
+
     func notify(title: String, sessionID: String? = nil, duration: TimeInterval = 8) {
+        guard !quiet else { return }
         noticeSessionID = sessionID
         companionView.notice = title
         attentionUntil = Date().addingTimeInterval(duration)

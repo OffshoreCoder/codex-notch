@@ -16,6 +16,8 @@ enum DashboardAction {
     case acknowledgeChat(String)
     case rename(String, String)
     case important(String?)
+    case quiet(TimeInterval?)
+    case endQuiet
 }
 
 /// Explicitly opened, keyboard-accessible window. The notch itself remains passive.
@@ -24,6 +26,9 @@ final class DashboardController: NSObject {
     private let window: NSWindow
     private let rows = NSStackView()
     private let summary = NSTextField(labelWithString: "")
+    private let quietButton = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let quietStatus = NSTextField(labelWithString: "Уведомления включены")
+    private let endQuietItem = NSMenuItem(title: "Выключить режим", action: nil, keyEquivalent: "")
     private let handler: (DashboardAction) -> Void
     private var entries: [DashboardEntry] = []
     private var renderedEntries: [DashboardEntry] = []
@@ -50,6 +55,32 @@ final class DashboardController: NSObject {
         summary.lineBreakMode = .byWordWrapping
         summary.maximumNumberOfLines = 3
 
+        quietButton.controlSize = .small
+        quietButton.font = .systemFont(ofSize: 12)
+        quietButton.addItem(withTitle: "Не отвлекать")
+        let quietOptions: [(String, Int)] = [
+            ("На 25 минут", 25 * 60), ("На 30 минут", 30 * 60),
+            ("На 1 час", 60 * 60), ("До выключения вручную", -1)
+        ]
+        quietButton.menu?.autoenablesItems = false
+        for (title, seconds) in quietOptions {
+            let item = NSMenuItem(title: title, action: #selector(selectQuiet(_:)), keyEquivalent: "")
+            item.tag = seconds
+            item.target = self
+            quietButton.menu?.addItem(item)
+        }
+        quietButton.menu?.addItem(.separator())
+        endQuietItem.target = self
+        endQuietItem.action = #selector(endQuiet)
+        endQuietItem.isEnabled = false
+        quietButton.menu?.addItem(endQuietItem)
+        quietStatus.font = .systemFont(ofSize: 11)
+        quietStatus.textColor = .secondaryLabelColor
+        quietStatus.lineBreakMode = .byTruncatingTail
+        quietStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let quietControls = NSStackView(views: [quietButton, quietStatus])
+        quietControls.spacing = 10
+
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
@@ -60,7 +91,7 @@ final class DashboardController: NSObject {
         rows.spacing = 10
         document.addSubview(rows)
         scroll.documentView = document
-        [title, summary, scroll].forEach {
+        [title, summary, quietControls, scroll].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview($0)
         }
@@ -72,7 +103,10 @@ final class DashboardController: NSObject {
             summary.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 6),
             summary.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             summary.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
-            scroll.topAnchor.constraint(equalTo: summary.bottomAnchor, constant: 16),
+            quietControls.topAnchor.constraint(equalTo: summary.bottomAnchor, constant: 12),
+            quietControls.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            quietControls.trailingAnchor.constraint(equalTo: summary.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: quietControls.bottomAnchor, constant: 12),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
             scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
@@ -97,6 +131,19 @@ final class DashboardController: NSObject {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
     }
+
+    func updateQuiet(status: String, active: Bool) {
+        quietStatus.stringValue = status
+        quietStatus.toolTip = status
+        quietButton.item(at: 0)?.title = active ? "Не отвлекать: вкл." : "Не отвлекать"
+        endQuietItem.isEnabled = active
+    }
+
+    @objc private func selectQuiet(_ sender: NSMenuItem) {
+        handler(.quiet(sender.tag < 0 ? nil : TimeInterval(sender.tag)))
+    }
+
+    @objc private func endQuiet() { handler(.endQuiet) }
 
     private func renderEntries() {
         let unread = entries.reduce(0) { $0 + max(0, $1.unreadCount) }
