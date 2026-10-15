@@ -35,10 +35,14 @@ final class NotchController: NSObject, NSMenuDelegate {
     private var selectedDisplay: CGDirectDisplayID?
     private var isVisible = true
     private var timer: Timer?
+    private var renderSchedule = CompanionRenderSchedule.resolve(visible: false, displaySleeping: false,
+        animated: false, reducedMotion: false, lowPower: false)
+    private var displaySleeping = false
+    private var powerObserver: NSObjectProtocol?
+    private var sleepObservers: [NSObjectProtocol] = []
     private var screenObserver: NSObjectProtocol?
     private var accessibilityObserver: NSObjectProtocol?
     private var animationStarted = Date()
-    private var lastFrame = Date.distantPast
     private var expandedUntil = Date.distantPast
     private var attentionUntil = Date.distantPast
     private var hoverUntil = Date.distantPast
@@ -70,6 +74,7 @@ final class NotchController: NSObject, NSMenuDelegate {
             guard let self else { return }
             self.dashboardHandler?()
         }
+        companionView.onPointerChanged = { [weak self] in self?.tick() }
         companionView.contextMenu = menu
         companionView.reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
@@ -96,15 +101,26 @@ final class NotchController: NSObject, NSMenuDelegate {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.companionView.reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                self?.refreshRenderSchedule()
                 self?.companionView.needsDisplay = true
             }
         }
-        // This reads only the pointer position to pass through transparent corners.
-        // It is not an event monitor and does not require Accessibility access.
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 24.0, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tick() }
+        powerObserver = NotificationCenter.default.addObserver(
+            forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshRenderSchedule() }
         }
-        if let timer { RunLoop.main.add(timer, forMode: .common) }
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.screensDidSleepNotification, NSWorkspace.willSleepNotification] {
+            sleepObservers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.setDisplaySleeping(true) }
+            })
+        }
+        for name in [NSWorkspace.screensDidWakeNotification, NSWorkspace.didWakeNotification] {
+            sleepObservers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.setDisplaySleeping(false) }
+            })
+        }
         positionPanel()
     }
 
@@ -114,9 +130,12 @@ final class NotchController: NSObject, NSMenuDelegate {
         if let accessibilityObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(accessibilityObserver)
         }
+        if let powerObserver { NotificationCenter.default.removeObserver(powerObserver) }
+        for observer in sleepObservers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
     }
 
     func update(_ snapshot: CompanionSnapshot) {
+        let changed = self.snapshot.state != snapshot.state || self.snapshot.activeCount != snapshot.activeCount
         if self.snapshot.state != snapshot.state {
             animationStarted = Date()
             statusItem.button?.image = Self.menuBarImage(skin: skin, state: snapshot.state)
@@ -126,7 +145,8 @@ final class NotchController: NSObject, NSMenuDelegate {
         self.snapshot = snapshot
         companionView.snapshot = snapshot
         refreshExpansion()
-        companionView.needsDisplay = true
+        refreshRenderSchedule()
+        if changed, panel.isVisible, !displaySleeping { companionView.needsDisplay = true }
         updateStatusItemDescription()
     }
 
@@ -147,10 +167,11 @@ final class NotchController: NSObject, NSMenuDelegate {
         self.chatNames = chatNames
         queueError = error
         let count = pendingCount ?? completions.count
+        let countChanged = companionView.unreadCount != count
         companionView.unreadCount = count
         statusItem.button?.title = count == 0 ? "" : " \(min(count, 99))"
         statusItem.length = count == 0 ? NSStatusItem.squareLength : NSStatusItem.variableLength
-        companionView.needsDisplay = true
+        if countChanged, panel.isVisible, !displaySleeping { companionView.needsDisplay = true }
     }
 
     /// Manual presentation mode: masks only this companion's visible surfaces.
@@ -296,7 +317,7 @@ final class NotchController: NSObject, NSMenuDelegate {
     }
 
     private func tick() {
-        guard isVisible else { return }
+        guard isVisible, panel.isVisible, !displaySleeping else { return }
         let localPointer = companionView.convert(panel.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
         let hovered = panel.isVisible && companionView.containsCapsule(localPointer)
         panel.ignoresMouseEvents = !hovered
@@ -315,12 +336,37 @@ final class NotchController: NSObject, NSMenuDelegate {
             hoverStarted = nil
         }
         refreshExpansion(now: now)
-        let animated = snapshot.state == .working || snapshot.state == .coding || snapshot.state == .checking || snapshot.state == .finished
-        let frameInterval = (animated && !companionView.reducedMotion) ? 1.0 / 20.0 : 1.0
-        guard now.timeIntervalSince(lastFrame) >= frameInterval else { return }
-        lastFrame = now
+        guard renderSchedule.drawsAnimation else { return }
         companionView.animationTime = now.timeIntervalSince(animationStarted)
         companionView.needsDisplay = true
+    }
+
+    /// macOS sends these notifications even when the app has no open dashboard.
+    /// Sleeping displays never need pointer checks or animation frames.
+    func setDisplaySleeping(_ sleeping: Bool) {
+        guard displaySleeping != sleeping else { return }
+        displaySleeping = sleeping
+        refreshRenderSchedule()
+        if !sleeping { refreshExpansion(); companionView.needsDisplay = true }
+    }
+
+    private func refreshRenderSchedule() {
+        let animated = snapshot.state == .working || snapshot.state == .coding || snapshot.state == .checking
+        let schedule = CompanionRenderSchedule.resolve(visible: isVisible && panel.isVisible,
+            displaySleeping: displaySleeping, animated: animated,
+            reducedMotion: companionView.reducedMotion, lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled)
+        guard schedule != renderSchedule else { return }
+        renderSchedule = schedule
+        timer?.invalidate(); timer = nil
+        guard let interval = schedule.timerInterval else { return }
+        // Only reads the pointer, never monitors other apps' events. Native tracking
+        // handles movement within our panel; this fallback re-enables transparent edges.
+        let next = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+        next.tolerance = schedule.tolerance
+        timer = next
+        RunLoop.main.add(next, forMode: .common)
     }
 
     private func refreshExpansion(now: Date = Date()) {
@@ -342,11 +388,12 @@ final class NotchController: NSObject, NSMenuDelegate {
     }
 
     private func positionPanel() {
-        guard let screen = targetScreen() else { panel.orderOut(nil); return }
+        guard let screen = targetScreen() else { panel.orderOut(nil); refreshRenderSchedule(); return }
         let notched = Self.hasPhysicalNotch(screen)
         if !isExpanded && !notched {
             // External and older displays use the normal, native menu-bar icon only.
             panel.orderOut(nil)
+            refreshRenderSchedule()
             return
         }
         let frame: NSRect
@@ -379,6 +426,7 @@ final class NotchController: NSObject, NSMenuDelegate {
         }
         panel.setFrame(frame, display: true)
         if isVisible { panel.orderFrontRegardless() } else { panel.orderOut(nil) }
+        refreshRenderSchedule()
     }
 
     private func targetScreen() -> NSScreen? {
@@ -511,6 +559,7 @@ final class NotchController: NSObject, NSMenuDelegate {
     @objc private func toggleVisibility() {
         isVisible.toggle()
         if isVisible { show() } else { panel.orderOut(nil) }
+        refreshRenderSchedule()
     }
 
     @objc private func revealState() { show() }
@@ -637,7 +686,9 @@ private final class CompanionView: NSView {
     var animationTime: TimeInterval = 0
     var reducedMotion = false
     var onClick: (() -> Void)?
+    var onPointerChanged: (() -> Void)?
     var contextMenu: NSMenu?
+    private var pointerTracking: NSTrackingArea?
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
     override var acceptsFirstResponder: Bool { false }
@@ -671,6 +722,18 @@ private final class CompanionView: NSView {
     }
 
     required init?(coder: NSCoder) { nil }
+
+    override func updateTrackingAreas() {
+        if let pointerTracking { removeTrackingArea(pointerTracking) }
+        let area = NSTrackingArea(rect: .zero,
+            options: [.activeAlways, .inVisibleRect, .mouseEnteredAndExited, .mouseMoved], owner: self)
+        addTrackingArea(area); pointerTracking = area
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) { onPointerChanged?() }
+    override func mouseExited(with event: NSEvent) { onPointerChanged?() }
+    override func mouseMoved(with event: NSEvent) { onPointerChanged?() }
 
     func containsCapsule(_ point: NSPoint) -> Bool {
         guard bounds.contains(point) else { return false }
