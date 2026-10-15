@@ -46,3 +46,6 @@ xcrun swiftc "${compiler_args[@]}" Sources/ResultSignal.swift Sources/TurnGroup.
 
 xcrun swiftc "${compiler_args[@]}" Sources/PrivacyPresentation.swift Tests/PrivacyTests.swift -o .build/privacy-tests
 ./.build/privacy-tests
+
+xcrun swiftc "${compiler_args[@]}" -framework AppKit Sources/ResultSignal.swift Sources/TurnGroup.swift Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Sources/CharacterSkin.swift Tests/CharacterSkinTests.swift -o .build/skin-tests
+./.build/skin-tests

@@ -86,6 +86,7 @@ if arguments.contains("--help") {
       --demo STATE           idle/working/coding/checking/finished/interrupted/unknown
       --preview PATH         сохранить изображение собственного окна и завершить
       --compact-preview      вместе с --preview сохранить крошечного персонажа
+      --skin NAME            robot/cat/ghost/astronaut для preview без изменения выбора
       --layout-report PATH   вместе с --preview сохранить геометрию собственного окна
       --print-hooks          показать результат слияния hooks.json без записи
       --connect-hooks        добавить только свои hooks с резервной копией
@@ -163,6 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 alert.runModal()
             } else { self.health.show() }
         }
+        controller.skinHandler = { [weak self] skin in self?.handle(.selectSkin(skin)) }
         controller.screenSharingHandler = { [weak self] in self?.handle(.toggleSharing) }
         controller.dashboardHandler = { [weak self] in
             guard let self else { return }
@@ -320,6 +322,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } ?? attentionSnapshot ?? live
         privacy.observe(sessionIDs: library.data.chats.keys.sorted())
         controller.setScreenSharing(library.data.screenSharing, presentation: privacy)
+        let skin = CharacterSkin(savedValue: option("--skin") ?? library.data.characterSkin)
+        controller.setSkin(skin)
+        dashboard.updateSkin(skin)
         controller.update(snapshot)
         controller.updateQueue(library.data.completions, error: library.error,
             pendingCount: Set(library.data.completions.map(\.id) + Array(library.data.attention.keys) + library.data.reviewingIDs).count,
@@ -334,6 +339,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 library.openChat(id)
                 dashboard.hide()
             }
+        case .selectSkin(let skin): library.update { $0.characterSkin = skin.rawValue }
         case .toggleSharing:
             library.update { $0.screenSharing.toggle() }
             health.hide()

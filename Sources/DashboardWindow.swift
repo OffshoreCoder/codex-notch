@@ -36,6 +36,7 @@ enum DashboardAction {
     case toggleGroupSelection(String)
     case archive(String)
     case restoreArchive(String)
+    case selectSkin(CharacterSkin)
     case toggleSharing
     case startGroup
     case cancelGroup
@@ -102,6 +103,7 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
     private var renderedEntries: [DashboardEntry] = []
     private var rowViews: [DashboardRow] = []
     private var sharing = false
+    private let skinButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private let sharingButton = NSButton(image: NSImage(systemSymbolName: "eye.slash", accessibilityDescription: "Режим демонстрации") ?? NSImage(), target: nil, action: nil)
     private let privacyLabel = NSTextField(labelWithString: "Без чтения переписки")
     private var feedbackTimer: Timer?
@@ -148,7 +150,21 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
         sharingButton.contentTintColor = DashboardPalette.secondary
         sharingButton.toolTip = "Режим демонстрации: скрыть названия и пути здесь"
         sharingButton.setAccessibilityLabel("Режим демонстрации")
-        let heading = NSStackView(views: [title, chatCount, Self.spacer(), sharingButton, close])
+        skinButton.addItem(withTitle: "Скин")
+        skinButton.controlSize = .small
+        skinButton.font = .systemFont(ofSize: 11, weight: .medium)
+        skinButton.setAccessibilityLabel("Скин персонажа")
+        skinButton.toolTip = "Выбрать персонажа у выреза и в значке меню"
+        skinButton.menu?.autoenablesItems = false
+        skinButton.menu?.delegate = self
+        for skin in CharacterSkin.allCases {
+            let item = NSMenuItem(title: skin.title, action: #selector(selectSkin(_:)), keyEquivalent: "")
+            item.representedObject = skin.rawValue
+            item.toolTip = skin.detail
+            item.target = self
+            skinButton.menu?.addItem(item)
+        }
+        let heading = NSStackView(views: [title, chatCount, Self.spacer(), skinButton, sharingButton, close])
         heading.spacing = 10
         close.widthAnchor.constraint(equalToConstant: 24).isActive = true
         close.heightAnchor.constraint(equalToConstant: 24).isActive = true
@@ -290,6 +306,17 @@ final class DashboardController: NSObject, NSMenuDelegate, NSSearchFieldDelegate
         feedbackTimer?.invalidate()
         if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
         if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
+    }
+
+    func updateSkin(_ skin: CharacterSkin) {
+        for item in skinButton.menu?.items ?? [] {
+            item.state = (item.representedObject as? String) == skin.rawValue ? .on : .off
+        }
+        skinButton.setAccessibilityValue(skin.title)
+    }
+    @objc private func selectSkin(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let skin = CharacterSkin(rawValue: raw) else { return }
+        handler(.selectSkin(skin))
     }
 
     /// Routine feedback must never start a modal event loop or block the dashboard.

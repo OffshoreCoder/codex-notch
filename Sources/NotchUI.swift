@@ -10,6 +10,8 @@ final class NotchController: NSObject, NSMenuDelegate {
     var liveHandler: (() -> Void)?
     var acknowledgeHandler: ((String?) -> Void)?
     var screenSharingHandler: (() -> Void)?
+    var skinHandler: ((CharacterSkin) -> Void)?
+    private var skin: CharacterSkin = .robot
     private var completions: [CompletedTurn] = []
     private var queueError: String?
     private var chatNames: [String: String] = [:]
@@ -66,7 +68,7 @@ final class NotchController: NSObject, NSMenuDelegate {
         companionView.contextMenu = menu
         companionView.reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
-        statusItem.button?.image = Self.menuBarImage()
+        statusItem.button?.image = Self.menuBarImage(skin: skin)
         statusItem.button?.image?.isTemplate = true
         statusItem.button?.target = self
         statusItem.button?.action = #selector(statusItemClicked(_:))
@@ -112,7 +114,7 @@ final class NotchController: NSObject, NSMenuDelegate {
     func update(_ snapshot: CompanionSnapshot) {
         if self.snapshot.state != snapshot.state {
             animationStarted = Date()
-            statusItem.button?.image = Self.menuBarImage(state: snapshot.state)
+            statusItem.button?.image = Self.menuBarImage(skin: skin, state: snapshot.state)
             statusItem.button?.image?.isTemplate = true
             statusItem.button?.contentTintColor = snapshot.state == .idle ? nil : snapshot.state.companionAccent
         }
@@ -121,6 +123,17 @@ final class NotchController: NSObject, NSMenuDelegate {
         refreshExpansion()
         companionView.needsDisplay = true
         updateStatusItemDescription()
+    }
+
+    /// Changes only the appearance; state, events and actions keep the same behavior.
+    func setSkin(_ skin: CharacterSkin) {
+        guard self.skin != skin else { return }
+        self.skin = skin
+        companionView.skin = skin
+        companionView.needsDisplay = true
+        statusItem.button?.image = Self.menuBarImage(skin: skin, state: snapshot.state)
+        statusItem.button?.image?.isTemplate = true
+        rebuildMenu()
     }
 
     func updateQueue(_ completions: [CompletedTurn], error: String?, pendingCount: Int? = nil, chatNames: [String: String] = [:]) {
@@ -400,6 +413,17 @@ final class NotchController: NSObject, NSMenuDelegate {
         menu.addItem(item("Проверить подключение…", action: #selector(openHealth)))
         menu.addItem(item("Чаты и результаты…", action: #selector(openDashboard)))
         menu.addItem(item("Показать состояние", action: #selector(revealState)))
+        let skins = NSMenu()
+        for skin in CharacterSkin.allCases {
+            let choice = item(skin.title, action: #selector(selectSkin(_:)))
+            choice.representedObject = skin.rawValue
+            choice.state = self.skin == skin ? .on : .off
+            choice.toolTip = skin.detail
+            skins.addItem(choice)
+        }
+        let skinItem = NSMenuItem(title: "Персонаж", action: nil, keyEquivalent: "")
+        skinItem.submenu = skins
+        menu.addItem(skinItem)
         menu.addItem(item(isVisible ? "Скрыть персонажа" : "Показать персонажа", action: #selector(toggleVisibility)))
         menu.addItem(item("Открыть Codex", action: #selector(openCodex)))
 
@@ -463,6 +487,12 @@ final class NotchController: NSObject, NSMenuDelegate {
 
     @objc private func revealState() { show() }
 
+    @objc private func selectSkin(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let skin = CharacterSkin(rawValue: raw) else { return }
+        setSkin(skin)
+        skinHandler?(skin)
+    }
+
     @objc private func selectAutomaticScreen() {
         selectedDisplay = nil
         positionPanel()
@@ -519,23 +549,45 @@ final class NotchController: NSObject, NSMenuDelegate {
         (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
     }
 
-    private static func menuBarImage(state: CompanionState = .idle) -> NSImage {
-        NSImage(size: NSSize(width: 20, height: 20), flipped: false) { _ in
+    private static func menuBarImage(skin: CharacterSkin = .robot, state: CompanionState = .idle) -> NSImage {
+        NSImage(size: NSSize(width: 20, height: 20), flipped: true) { _ in
             NSColor.labelColor.setStroke()
-            let head = NSBezierPath(roundedRect: NSRect(x: 3, y: 5, width: 14, height: 11), xRadius: 4, yRadius: 4)
-            head.lineWidth = 1.5
-            head.stroke()
-            let antenna = NSBezierPath()
-            antenna.move(to: NSPoint(x: 10, y: 16))
-            antenna.line(to: NSPoint(x: 10, y: 18))
-            antenna.lineWidth = 1.5
-            antenna.stroke()
             NSColor.labelColor.setFill()
-            NSBezierPath(ovalIn: NSRect(x: 6, y: 9, width: 2, height: 3)).fill()
-            NSBezierPath(ovalIn: NSRect(x: 12, y: 9, width: 2, height: 3)).fill()
-            if state == .checking || state == .finished || state == .interrupted {
-                // Persistent state indicator remains after the attention card folds.
-                NSBezierPath(ovalIn: NSRect(x: 15, y: 2, width: 4, height: 4)).fill()
+            let silhouette: NSBezierPath
+            switch skin {
+            case .robot:
+                silhouette = NSBezierPath(roundedRect: NSRect(x: 3, y: 5, width: 14, height: 11), xRadius: 4, yRadius: 4)
+                let antenna = NSBezierPath()
+                antenna.move(to: NSPoint(x: 10, y: 5)); antenna.line(to: NSPoint(x: 10, y: 2))
+                antenna.lineWidth = 1.5; antenna.stroke()
+            case .cat:
+                silhouette = NSBezierPath()
+                silhouette.move(to: NSPoint(x: 3, y: 9)); silhouette.line(to: NSPoint(x: 3, y: 2))
+                silhouette.line(to: NSPoint(x: 8, y: 6)); silhouette.line(to: NSPoint(x: 12, y: 6))
+                silhouette.line(to: NSPoint(x: 17, y: 2)); silhouette.line(to: NSPoint(x: 17, y: 11))
+                silhouette.curve(to: NSPoint(x: 3, y: 11), controlPoint1: NSPoint(x: 17, y: 19), controlPoint2: NSPoint(x: 3, y: 19))
+                silhouette.close()
+            case .ghost:
+                silhouette = NSBezierPath()
+                silhouette.move(to: NSPoint(x: 4, y: 17)); silhouette.line(to: NSPoint(x: 4, y: 8))
+                silhouette.curve(to: NSPoint(x: 16, y: 8), controlPoint1: NSPoint(x: 4, y: 0), controlPoint2: NSPoint(x: 16, y: 0))
+                silhouette.line(to: NSPoint(x: 16, y: 17)); silhouette.line(to: NSPoint(x: 13, y: 14))
+                silhouette.line(to: NSPoint(x: 10, y: 17)); silhouette.line(to: NSPoint(x: 7, y: 14)); silhouette.close()
+            case .astronaut:
+                silhouette = NSBezierPath(ovalIn: NSRect(x: 2.5, y: 2, width: 15, height: 14))
+                let visor = NSBezierPath(roundedRect: NSRect(x: 5, y: 6, width: 10, height: 6), xRadius: 2, yRadius: 2)
+                visor.lineWidth = 1.2; visor.stroke()
+                let feet = NSBezierPath()
+                feet.move(to: NSPoint(x: 6, y: 16)); feet.line(to: NSPoint(x: 6, y: 18))
+                feet.move(to: NSPoint(x: 14, y: 16)); feet.line(to: NSPoint(x: 14, y: 18))
+                feet.lineWidth = 1.5; feet.stroke()
+            }
+            silhouette.lineWidth = 1.4; silhouette.lineJoinStyle = .round; silhouette.stroke()
+            for x: CGFloat in [6.5, 12] {
+                NSBezierPath(roundedRect: NSRect(x: x, y: 8, width: 1.5, height: 3), xRadius: 0.7, yRadius: 0.7).fill()
+            }
+            if state == .checking || state == .finished || state == .interrupted || state == .needsAnswer || state == .needsReview {
+                NSBezierPath(ovalIn: NSRect(x: 15, y: 15, width: 4, height: 4)).fill()
             }
             return true
         }
@@ -551,6 +603,7 @@ private final class CompanionPanel: NSPanel {
 private final class CompanionView: NSView {
     var snapshot = CompanionSnapshot(state: .idle, sessionID: nil, activeCount: 0, updatedAt: Date())
     var unreadCount = 0
+    var skin: CharacterSkin = .robot
     var notice: String?
     var animationTime: TimeInterval = 0
     var reducedMotion = false
@@ -624,7 +677,8 @@ private final class CompanionView: NSView {
                                  yBy: bounds.height / 2 - 25 * scale)
             transform.scale(by: scale)
             transform.concat()
-            drawRobot(at: .zero, accent: accent, showAura: false)
+            CharacterRenderer.draw(skin: skin, state: snapshot.state, animationTime: animationTime,
+                                   reducedMotion: reducedMotion, accent: accent, showAura: false)
             NSGraphicsContext.restoreGraphicsState()
             if unreadCount > 0 {
                 mint.setFill()
@@ -645,7 +699,8 @@ private final class CompanionView: NSView {
         border.lineWidth = 0.7
         border.stroke()
 
-        drawRobot(at: NSPoint(x: 23, y: 16), accent: accent)
+        CharacterRenderer.draw(skin: skin, state: snapshot.state, animationTime: animationTime,
+                               reducedMotion: reducedMotion, origin: NSPoint(x: 23, y: 16), accent: accent)
         drawText("CODEX", at: NSPoint(x: 96, y: 19), font: .systemFont(ofSize: 10, weight: .semibold),
                  color: NSColor.white.withAlphaComponent(0.48), tracking: 2.1)
         drawText(notice ?? snapshot.state.companionTitle, at: NSPoint(x: 96, y: 37),
@@ -657,89 +712,6 @@ private final class CompanionView: NSView {
         drawStatus(accent: accent)
         NSGraphicsContext.restoreGraphicsState()
         setAccessibilityLabel("Codex: \(snapshot.state.companionTitle)")
-    }
-
-    private func drawRobot(at origin: NSPoint, accent: NSColor, showAura: Bool = true) {
-        let busy = snapshot.state == .working || snapshot.state == .coding
-        let t = reducedMotion ? 0 : animationTime
-        let bounce: CGFloat = busy ? CGFloat(sin(t * 3.4)) * 1.3 : 0
-        let x = origin.x
-        let y = origin.y + bounce
-
-        // A small robot, drawn entirely with local vector paths.
-        if showAura {
-            accent.withAlphaComponent(0.08).setFill()
-            NSBezierPath(ovalIn: NSRect(x: x - 8, y: y - 4, width: 73, height: 63)).fill()
-        }
-        let antenna = NSBezierPath()
-        antenna.move(to: NSPoint(x: x + 28, y: y + 6))
-        antenna.line(to: NSPoint(x: x + 28, y: y))
-        antenna.lineWidth = 2
-        accent.withAlphaComponent(0.75).setStroke()
-        antenna.stroke()
-        accent.setFill()
-        NSBezierPath(ovalIn: NSRect(x: x + 25.5, y: y - 4, width: 5, height: 5)).fill()
-
-        NSColor(calibratedRed: 0.14, green: 0.21, blue: 0.20, alpha: 1).setFill()
-        NSBezierPath(roundedRect: NSRect(x: x - 3, y: y + 21, width: 7, height: 15), xRadius: 3, yRadius: 3).fill()
-        NSBezierPath(roundedRect: NSRect(x: x + 51, y: y + 21, width: 7, height: 15), xRadius: 3, yRadius: 3).fill()
-
-        let head = NSBezierPath(roundedRect: NSRect(x: x, y: y + 6, width: 56, height: 43), xRadius: 13, yRadius: 13)
-        mint.setFill()
-        head.fill()
-        NSColor.white.withAlphaComponent(0.45).setStroke()
-        head.lineWidth = 0.6
-        head.stroke()
-        NSColor(calibratedRed: 0.045, green: 0.105, blue: 0.095, alpha: 1).setFill()
-        NSBezierPath(roundedRect: NSRect(x: x + 6, y: y + 14, width: 44, height: 25), xRadius: 8, yRadius: 8).fill()
-
-        let blink = !reducedMotion && animationTime.truncatingRemainder(dividingBy: 6.7) > 6.48
-        mint.setFill()
-        if snapshot.state == .finished {
-            eyeSmile(x: x + 14, y: y + 23)
-            eyeSmile(x: x + 35, y: y + 23)
-        } else if snapshot.state == .checking {
-            NSBezierPath(roundedRect: NSRect(x: x + 15, y: y + 21, width: 5, height: 8), xRadius: 2.5, yRadius: 2.5).fill()
-            NSBezierPath(roundedRect: NSRect(x: x + 36, y: y + 21, width: 5, height: 8), xRadius: 2.5, yRadius: 2.5).fill()
-            accent.setFill()
-            NSBezierPath(ovalIn: NSRect(x: x + 27, y: y + 32, width: 3, height: 3)).fill()
-        } else if snapshot.state == .interrupted || snapshot.state == .unknown {
-            NSBezierPath(roundedRect: NSRect(x: x + 14, y: y + 25, width: 8, height: 2.5), xRadius: 1, yRadius: 1).fill()
-            NSBezierPath(roundedRect: NSRect(x: x + 34, y: y + 25, width: 8, height: 2.5), xRadius: 1, yRadius: 1).fill()
-        } else {
-            let glance: CGFloat = snapshot.state == .working ? CGFloat(sin(t * 1.4)) * 2 : 0
-            NSBezierPath(roundedRect: NSRect(x: x + 15 + glance, y: y + 22, width: 5, height: blink ? 1.7 : 7), xRadius: 2, yRadius: 2).fill()
-            NSBezierPath(roundedRect: NSRect(x: x + 36 + glance, y: y + 22, width: 5, height: blink ? 1.7 : 7), xRadius: 2, yRadius: 2).fill()
-        }
-
-        // Tiny feet and keyboard make coding distinct even without animation.
-        mint.withAlphaComponent(0.75).setFill()
-        NSBezierPath(roundedRect: NSRect(x: x + 11, y: y + 49, width: 11, height: 5), xRadius: 2, yRadius: 2).fill()
-        NSBezierPath(roundedRect: NSRect(x: x + 34, y: y + 49, width: 11, height: 5), xRadius: 2, yRadius: 2).fill()
-        if snapshot.state == .coding {
-            NSColor(calibratedWhite: 0.25, alpha: 1).setFill()
-            NSBezierPath(roundedRect: NSRect(x: x + 1, y: y + 44, width: 54, height: 8), xRadius: 3, yRadius: 3).fill()
-            for index in 0..<8 {
-                let lit = Int(t * 8).quotientAndRemainder(dividingBy: 8).remainder == index
-                mint.withAlphaComponent(lit ? 1 : 0.35).setFill()
-                NSBezierPath(roundedRect: NSRect(x: x + 7 + CGFloat(index) * 5.6, y: y + 46, width: 3.5, height: 2), xRadius: 0.5, yRadius: 0.5).fill()
-            }
-        }
-        if snapshot.state == .finished {
-            drawSparkle(center: NSPoint(x: x + 59, y: y + 8), size: 4, color: accent)
-            drawSparkle(center: NSPoint(x: x - 5, y: y + 10), size: 2.5, color: accent.withAlphaComponent(0.7))
-        }
-    }
-
-    private func eyeSmile(x: CGFloat, y: CGFloat) {
-        let path = NSBezierPath()
-        path.move(to: NSPoint(x: x, y: y + 4))
-        path.curve(to: NSPoint(x: x + 8, y: y + 4),
-                   controlPoint1: NSPoint(x: x + 1, y: y - 2), controlPoint2: NSPoint(x: x + 7, y: y - 2))
-        path.lineWidth = 2.5
-        path.lineCapStyle = .round
-        mint.setStroke()
-        path.stroke()
     }
 
     private func drawStatus(accent: NSColor) {
@@ -777,21 +749,6 @@ private final class CompanionView: NSView {
             accent.withAlphaComponent(0.7).setFill()
             NSBezierPath(ovalIn: NSRect(x: center.x - 2, y: center.y - 2, width: 4, height: 4)).fill()
         }
-    }
-
-    private func drawSparkle(center: NSPoint, size: CGFloat, color: NSColor) {
-        let path = NSBezierPath()
-        path.move(to: NSPoint(x: center.x, y: center.y - size))
-        path.line(to: NSPoint(x: center.x + size * 0.3, y: center.y - size * 0.3))
-        path.line(to: NSPoint(x: center.x + size, y: center.y))
-        path.line(to: NSPoint(x: center.x + size * 0.3, y: center.y + size * 0.3))
-        path.line(to: NSPoint(x: center.x, y: center.y + size))
-        path.line(to: NSPoint(x: center.x - size * 0.3, y: center.y + size * 0.3))
-        path.line(to: NSPoint(x: center.x - size, y: center.y))
-        path.line(to: NSPoint(x: center.x - size * 0.3, y: center.y - size * 0.3))
-        path.close()
-        color.setFill()
-        path.fill()
     }
 
     private func drawText(_ text: String, at point: NSPoint, font: NSFont, color: NSColor,
