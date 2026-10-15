@@ -129,7 +129,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return (report, text)
         })
         controller.healthHandler = { [weak self] in self?.health.show() }
-        controller.dashboardHandler = { [weak self] in self?.dashboard.show() }
+        controller.dashboardHandler = { [weak self] in
+            guard let self else { return }
+            self.controller.dismissStateCard()
+            if let location = self.controller.dashboardLocation() {
+                self.dashboard.toggle(anchor: location.anchor, screen: location.screen)
+            } else { self.dashboard.show() }
+        }
         controller.acknowledgeHandler = { [weak self] id in
             guard let self else { return }
             if let id { self.library.acknowledge(id) } else { self.library.acknowledgeAll() }
@@ -145,7 +151,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                 if arguments.contains("--preview-dashboard") {
                     self?.populatePreview()
-                    self?.dashboard.show()
+                    if let self, let location = self.controller.dashboardLocation() {
+                        self.dashboard.show(anchor: location.anchor, screen: location.screen)
+                    } else { self?.dashboard.show() }
                     self?.dashboard.capturePreview(to: URL(fileURLWithPath: path))
                 } else if arguments.contains("--compact-preview") {
                     self?.controller.captureCompactPreview(to: URL(fileURLWithPath: path))
@@ -153,9 +161,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self?.controller.capturePreview(to: URL(fileURLWithPath: path))
                 }
                 if let reportPath = option("--layout-report"),
-                   let report = self?.controller.layoutReport(),
-                   let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) {
-                    try? data.write(to: URL(fileURLWithPath: reportPath), options: .atomic)
+                   var report = self?.controller.layoutReport() {
+                    report["dashboardFrame"] = self?.dashboard.layoutReport()
+                    if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) {
+                        try? data.write(to: URL(fileURLWithPath: reportPath), options: .atomic)
+                    }
                 }
                 NSApplication.shared.terminate(nil)
             }
@@ -280,7 +290,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let elapsed = duration.map { "Ход: " + Self.duration($0) } ?? ""
             let request = library.data.attention.values.first { $0.sessionID == chat.id }
             let deferred = library.data.deferredReminders.filter { $0.sessionID == chat.id }
-            return DashboardEntry(id: chat.id, name: library.name(for: chat.id),
+            var entry = DashboardEntry(id: chat.id, name: library.name(for: chat.id),
                 stateText: request?.state.companionTitle ?? (state == .finished ? "Ход завершён" : state.companionTitle),
                 elapsedText: state == .unknown ? "Последнее известное состояние" : elapsed,
                 updatedText: "Последний сигнал: " + Self.duration(Date().timeIntervalSince(chat.updatedAt)) + " назад",
@@ -293,6 +303,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         Self.duration($0.dueAt.timeIntervalSinceNow)
                 }.joined(separator: " · ") + (deferred.isEmpty ? "" : " · Напоминание ожидает окончания тишины"),
                 attentionText: request == nil ? "" : "Требует внимания")
+            if request != nil { entry.status = .attention }
+            else if [.working, .coding, .checking].contains(state) { entry.status = .running }
+            else if state == .finished { entry.status = .completed }
+            else if state == .interrupted { entry.status = .interrupted }
+            else if state == .unknown { entry.status = .unknown }
+            else { entry.status = .idle }
+            return entry
         }
         dashboard.update(entries: entries)
     }
@@ -308,11 +325,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     """
 
     private func populatePreview() {
-        let entries = [
+        var entries = [
             DashboardEntry(id: "demo-a", name: "Review библиотеки", stateText: "Посмотри результат", elapsedText: "Ход: 7 мин", updatedText: "Последний сигнал: 12 с назад", unreadCount: 1, isImportant: true, canRemindResult: true, attentionText: "Требует внимания"),
             DashboardEntry(id: "demo-b", name: "Исправление сборки", stateText: "Пишет код", elapsedText: "Ход: 3 мин", updatedText: "Последний сигнал: 2 с назад", unreadCount: 0, canWatchDuration: true, reminderText: "Проверить длительность через 7 мин"),
             DashboardEntry(id: "demo-c", name: "Проверка тестов", stateText: "Ход завершён", elapsedText: "Ход: 42 с", updatedText: "Последний сигнал: 2 мин назад", unreadCount: 2, canRemindResult: true)
         ]
+        entries[0].status = .attention
+        entries[1].status = .running
+        entries[2].status = .completed
         dashboard.update(entries: entries)
         dashboard.updateQuiet(status: "Тишина ещё 18 мин", active: true)
     }

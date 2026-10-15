@@ -31,6 +31,7 @@ final class NotchController: NSObject, NSMenuDelegate {
     private var attentionUntil = Date.distantPast
     private var hoverUntil = Date.distantPast
     private var hoverStarted: Date?
+    private var suppressHoverUntilExit = false
     private var isExpanded = false
 
     override init() {
@@ -62,8 +63,12 @@ final class NotchController: NSObject, NSMenuDelegate {
 
         statusItem.button?.image = Self.menuBarImage()
         statusItem.button?.image?.isTemplate = true
-        statusItem.button?.toolTip = "Codex Notch · работает только на этом Mac"
-        statusItem.menu = menu
+        statusItem.button?.target = self
+        statusItem.button?.action = #selector(statusItemClicked(_:))
+        statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        statusItem.button?.setAccessibilityHelp("Нажмите, чтобы открыть чаты. Правый клик открывает настройки.")
+        statusItem.menu = nil
+        updateStatusItemDescription()
         menu.delegate = self
         rebuildMenu()
 
@@ -110,7 +115,7 @@ final class NotchController: NSObject, NSMenuDelegate {
         companionView.snapshot = snapshot
         refreshExpansion()
         companionView.needsDisplay = true
-        statusItem.button?.toolTip = "Codex · \(snapshot.state.companionTitle) · локально"
+        updateStatusItemDescription()
     }
 
     func updateQueue(_ completions: [CompletedTurn], error: String?, pendingCount: Int? = nil) {
@@ -144,6 +149,39 @@ final class NotchController: NSObject, NSMenuDelegate {
         positionPanel()
     }
 
+    /// Global screen coordinates for a dashboard immediately below the notch or menu-bar button.
+    func dashboardLocation() -> (anchor: NSRect, screen: NSScreen)? {
+        guard let selectedScreen = targetScreen() else { return nil }
+        if Self.hasPhysicalNotch(selectedScreen),
+           let left = selectedScreen.auxiliaryTopLeftArea,
+           let right = selectedScreen.auxiliaryTopRightArea {
+            let height = selectedScreen.safeAreaInsets.top
+            let anchor = NSRect(x: left.maxX, y: selectedScreen.frame.maxY - height,
+                                width: max(0, right.minX - left.maxX), height: height)
+            return (anchor, selectedScreen)
+        }
+        if let button = statusItem.button, let statusWindow = button.window,
+           let statusScreen = statusWindow.screen {
+            let anchor = statusWindow.convertToScreen(button.convert(button.bounds, to: nil))
+            return (anchor, statusScreen)
+        }
+        let top = min(selectedScreen.visibleFrame.maxY, selectedScreen.frame.maxY)
+        return (NSRect(x: selectedScreen.frame.midX - 16, y: top, width: 32,
+                       height: max(1, selectedScreen.frame.maxY - top)), selectedScreen)
+    }
+
+    /// Dismissing a transient state card never acknowledges results or explicit requests.
+    func dismissStateCard() {
+        expandedUntil = .distantPast
+        attentionUntil = .distantPast
+        hoverUntil = .distantPast
+        hoverStarted = nil
+        suppressHoverUntilExit = true
+        companionView.notice = nil
+        noticeSessionID = nil
+        setExpanded(false)
+    }
+
     /// Renders only our view into a PNG. Does not record or read the display.
     func capturePreview(to url: URL) {
         setExpanded(true)
@@ -164,7 +202,10 @@ final class NotchController: NSObject, NSMenuDelegate {
              "auxiliaryTopRightFrame": screen.auxiliaryTopRightArea.map { Self.geometry($0) } as Any? ?? NSNull(),
              "hasPhysicalNotch": Self.hasPhysicalNotch(screen)]
         } ?? NSNull()
+        let location = dashboardLocation()
         return ["targetScreen": screen, "panelFrame": Self.geometry(panel.frame),
+                "dashboardAnchor": location.map { Self.geometry($0.anchor) } as Any? ?? NSNull(),
+                "dashboardScreenFrame": location.map { Self.geometry($0.screen.frame) } as Any? ?? NSNull(),
                 "isExpanded": isExpanded, "visible": panel.isVisible, "characterEnabled": isVisible]
     }
 
@@ -197,7 +238,8 @@ final class NotchController: NSObject, NSMenuDelegate {
         let hovered = panel.isVisible && companionView.containsCapsule(localPointer)
         panel.ignoresMouseEvents = !hovered
         let now = Date()
-        if hovered {
+        if !hovered { suppressHoverUntilExit = false }
+        if hovered && !suppressHoverUntilExit {
             if hoverStarted == nil { hoverStarted = now }
             if isExpanded || now.timeIntervalSince(hoverStarted ?? now) >= 0.5 {
                 hoverUntil = now.addingTimeInterval(0.35)
@@ -354,6 +396,20 @@ final class NotchController: NSObject, NSMenuDelegate {
         menu.addItem(item("Завершить Codex Notch", action: #selector(quit), key: "q"))
     }
 
+    private func updateStatusItemDescription() {
+        statusItem.button?.toolTip = "Codex · \(snapshot.state.companionTitle) · клик: чаты · правый клик: настройки"
+        statusItem.button?.setAccessibilityLabel("Codex Notch: \(snapshot.state.companionTitle). Открыть чаты")
+    }
+
+    @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
+        if let event = NSApp.currentEvent,
+           event.type == .rightMouseUp || event.type == .rightMouseDown || event.modifierFlags.contains(.control) {
+            NSMenu.popUpContextMenu(menu, with: event, for: sender)
+        } else {
+            dashboardHandler?()
+        }
+    }
+
     private func item(_ title: String, action: Selector, key: String = "") -> NSMenuItem {
         let result = NSMenuItem(title: title, action: action, keyEquivalent: key)
         result.target = self
@@ -486,8 +542,8 @@ private final class CompanionView: NSView {
         super.init(frame: frameRect)
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
-        setAccessibilityHelp("Нажмите на маленького робота, чтобы показать состояние. Нажмите на карточку, чтобы открыть чат Codex.")
-        toolTip = "Наведите на полсекунды или нажмите, чтобы показать состояние Codex"
+        setAccessibilityHelp("Нажмите, чтобы открыть чаты Codex под вырезом. Правый клик открывает настройки.")
+        toolTip = "Нажмите, чтобы открыть чаты; наведите на полсекунды, чтобы увидеть состояние"
     }
 
     required init?(coder: NSCoder) { nil }

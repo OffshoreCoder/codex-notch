@@ -1,5 +1,9 @@
 import AppKit
 
+enum DashboardStatus: String, Equatable {
+    case running, attention, completed, idle, unknown, interrupted
+}
+
 /// Display metadata only: names are entered locally by the user, never read from chats.
 struct DashboardEntry: Equatable {
     let id: String
@@ -13,6 +17,7 @@ struct DashboardEntry: Equatable {
     var canWatchDuration: Bool = false
     var reminderText: String = ""
     var attentionText: String = ""
+    var status: DashboardStatus = .idle
 }
 
 enum DashboardAction {
@@ -28,58 +33,112 @@ enum DashboardAction {
     case copyAttentionInstruction
 }
 
-/// Explicitly opened, keyboard-accessible window. The notch itself remains passive.
+private enum DashboardPalette {
+    static let background = NSColor(hex: 0x11151B)
+    static let card = NSColor(hex: 0x191F29)
+    static let border = NSColor(hex: 0x2A3340)
+    static let text = NSColor(hex: 0xE9EDF3)
+    static let secondary = NSColor(hex: 0xA0ACBD)
+    static let dim = NSColor(hex: 0x738095)
+    static let blue = NSColor(hex: 0x7FAEFF)
+    static let amber = NSColor(hex: 0xF1C27A)
+    static let green = NSColor(hex: 0x81CFB0)
+    static func color(for status: DashboardStatus) -> NSColor {
+        switch status {
+        case .running: return blue
+        case .attention: return amber
+        case .completed: return green
+        case .interrupted: return NSColor(hex: 0xE69A97)
+        case .idle, .unknown: return secondary
+        }
+    }
+}
+
+/// Opened only by an explicit user action; event polling never opens this panel.
 @MainActor
-final class DashboardController: NSObject {
-    private let window: NSWindow
+final class DashboardController: NSObject, NSMenuDelegate {
+    private enum Filter: Int { case all, running, attention, completed }
+    private let panel: DashboardPanel
     private let rows = NSStackView()
-    private let summary = NSTextField(wrappingLabelWithString: "")
+    private let chatCount = NSTextField(labelWithString: "")
+    private let runningCount = NSTextField(labelWithString: "")
+    private let attentionCount = NSTextField(labelWithString: "")
+    private let completedCount = NSTextField(labelWithString: "")
+    private let focusStatus = NSTextField(labelWithString: "Все чаты могут уведомлять")
     private let quietButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private let quietStatus = NSTextField(labelWithString: "Уведомления включены")
     private let endQuietItem = NSMenuItem(title: "Выключить режим", action: nil, keyEquivalent: "")
+    private let filterControl = NSSegmentedControl(labels: ["Все", "В работе", "Ждут тебя", "Готовы"],
+                                                  trackingMode: .selectOne, target: nil, action: nil)
     private let handler: (DashboardAction) -> Void
     private var entries: [DashboardEntry] = []
     private var renderedEntries: [DashboardEntry] = []
     private var rowViews: [DashboardRow] = []
+    private var filter = Filter.all
     private var isRenaming = false
+    private var trackingMenu = false
+    private var toggleRegion: NSRect?
+    private var localMouseMonitor: Any?
+    private var globalMouseMonitor: Any?
+
+    var isVisible: Bool { panel.isVisible }
 
     init(handler: @escaping (DashboardAction) -> Void) {
         self.handler = handler
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 440),
-                          styleMask: [.titled, .closable, .resizable],
-                          backing: .buffered, defer: false)
+        panel = DashboardPanel(contentRect: NSRect(x: 0, y: 0, width: 520, height: 560),
+                               styleMask: [.borderless], backing: .buffered, defer: false)
         super.init()
-        window.title = "Чаты Codex"
-        window.minSize = NSSize(width: 520, height: 360)
-        window.isReleasedWhenClosed = false
-        window.center()
+        panel.title = "Чаты Codex"
+        panel.appearance = NSAppearance(named: .darkAqua)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.level = .popUpMenu
+        panel.isReleasedWhenClosed = false
+        panel.hidesOnDeactivate = false
+        panel.isMovable = false
+        panel.animationBehavior = .none
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.onCancel = { [weak self] in self?.hide() }
 
-        let root = DashboardRootView()
-        window.contentView = root
-        let title = NSTextField(labelWithString: "Чаты Codex")
-        title.font = .systemFont(ofSize: 20, weight: .semibold)
-        let attentionInstruction = NSButton(title: "Включить сигналы в чате…", target: self,
-                                            action: #selector(copyAttentionInstruction))
-        attentionInstruction.bezelStyle = .rounded
-        attentionInstruction.controlSize = .small
-        attentionInstruction.font = .systemFont(ofSize: 11)
-        attentionInstruction.toolTip = "Скопировать инструкцию для выбранного чата. Сигнал появится только после явной команды из инструкции; проверка разрешений сама по себе его не включает."
-        summary.font = .systemFont(ofSize: 12)
-        summary.textColor = .secondaryLabelColor
-        summary.lineBreakMode = .byWordWrapping
-        summary.maximumNumberOfLines = 3
-        summary.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        summary.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let root = DashboardSurface()
+        panel.contentView = root
+        let title = Self.label("Чаты Codex", size: 19, weight: .semibold, color: DashboardPalette.text)
+        configureMetadata(chatCount)
+        let close = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Закрыть") ?? NSImage(),
+                             target: self, action: #selector(closePanel))
+        close.isBordered = false
+        close.contentTintColor = DashboardPalette.secondary
+        close.toolTip = "Закрыть · Esc"
+        close.setAccessibilityLabel("Закрыть чаты Codex")
+        let heading = NSStackView(views: [title, chatCount, Self.spacer(), close])
+        heading.spacing = 10
+        close.widthAnchor.constraint(equalToConstant: 24).isActive = true
+        close.heightAnchor.constraint(equalToConstant: 24).isActive = true
 
+        configureCounter(runningCount, color: DashboardPalette.blue)
+        configureCounter(attentionCount, color: DashboardPalette.amber)
+        configureCounter(completedCount, color: DashboardPalette.green)
+        let counts = NSStackView(views: [runningCount, attentionCount, completedCount, Self.spacer()])
+        counts.spacing = 18
+        filterControl.controlSize = .small
+        filterControl.segmentStyle = .rounded
+        filterControl.font = .systemFont(ofSize: 11, weight: .medium)
+        filterControl.selectedSegment = 0
+        filterControl.target = self
+        filterControl.action = #selector(changeFilter)
+
+        focusStatus.font = .systemFont(ofSize: 11)
+        focusStatus.textColor = DashboardPalette.secondary
+        focusStatus.lineBreakMode = .byTruncatingTail
+        focusStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         quietButton.controlSize = .small
-        quietButton.font = .systemFont(ofSize: 12)
+        quietButton.font = .systemFont(ofSize: 11)
         quietButton.addItem(withTitle: "Не отвлекать")
-        let quietOptions: [(String, Int)] = [
-            ("На 25 минут", 25 * 60), ("На 30 минут", 30 * 60),
-            ("На 1 час", 60 * 60), ("До выключения вручную", -1)
-        ]
         quietButton.menu?.autoenablesItems = false
-        for (title, seconds) in quietOptions {
+        quietButton.menu?.delegate = self
+        for (title, seconds) in [("На 25 минут", 1500), ("На 30 минут", 1800),
+                                 ("На 1 час", 3600), ("До выключения вручную", -1)] {
             let item = NSMenuItem(title: title, action: #selector(selectQuiet(_:)), keyEquivalent: "")
             item.tag = seconds
             item.target = self
@@ -90,77 +149,122 @@ final class DashboardController: NSObject {
         endQuietItem.action = #selector(endQuiet)
         endQuietItem.isEnabled = false
         quietButton.menu?.addItem(endQuietItem)
-        quietStatus.font = .systemFont(ofSize: 11)
-        quietStatus.textColor = .secondaryLabelColor
-        quietStatus.lineBreakMode = .byTruncatingTail
+        configureMetadata(quietStatus)
         quietStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let quietControls = NSStackView(views: [quietButton, quietStatus])
-        quietControls.spacing = 10
-
+        let focusControls = NSStackView(views: [focusStatus, Self.spacer(), quietButton])
+        focusControls.spacing = 10
+        let top = NSStackView(views: [heading, counts, filterControl, focusControls, quietStatus])
+        top.orientation = .vertical
+        top.alignment = .leading
+        top.spacing = 12
+        [heading, counts, filterControl, focusControls, quietStatus].forEach {
+            $0.widthAnchor.constraint(equalTo: top.widthAnchor).isActive = true
+        }
+        let divider = NSBox()
+        divider.boxType = .separator
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
+        scroll.scrollerStyle = .overlay
         let document = DashboardDocumentView()
         rows.orientation = .vertical
         rows.alignment = .leading
         rows.spacing = 10
         document.addSubview(rows)
         scroll.documentView = document
-        [title, attentionInstruction, summary, quietControls, scroll].forEach {
+        let instruction = NSButton(title: "Сигналы…", target: self, action: #selector(copyAttentionInstruction))
+        instruction.bezelStyle = .rounded
+        instruction.controlSize = .small
+        instruction.font = .systemFont(ofSize: 11)
+        instruction.toolTip = "Скопировать инструкцию в нужный чат. Сигнал появляется только после явной команды; проверка разрешений сама по себе его не включает."
+        let privacy = Self.label("Без чтения переписки", size: 10, color: DashboardPalette.dim, monospaced: true)
+        let footer = NSStackView(views: [instruction, Self.spacer(), privacy])
+        [top, divider, scroll, footer].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview($0)
         }
         document.translatesAutoresizingMaskIntoConstraints = false
         rows.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            title.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
-            title.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
-            title.trailingAnchor.constraint(lessThanOrEqualTo: attentionInstruction.leadingAnchor, constant: -12),
-            attentionInstruction.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
-            attentionInstruction.centerYAnchor.constraint(equalTo: title.centerYAnchor),
-            summary.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 6),
-            summary.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            summary.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
-            quietControls.topAnchor.constraint(equalTo: summary.bottomAnchor, constant: 12),
-            quietControls.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            quietControls.trailingAnchor.constraint(equalTo: summary.trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: quietControls.bottomAnchor, constant: 12),
+            top.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
+            top.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
+            top.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
+            divider.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 14),
+            divider.leadingAnchor.constraint(equalTo: top.leadingAnchor),
+            divider.trailingAnchor.constraint(equalTo: top.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 12),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
-            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
+            scroll.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -12),
+            footer.leadingAnchor.constraint(equalTo: top.leadingAnchor),
+            footer.trailingAnchor.constraint(equalTo: top.trailingAnchor),
+            footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14),
             document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
             rows.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 4),
             rows.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -4),
-            rows.topAnchor.constraint(equalTo: document.topAnchor, constant: 4),
-            rows.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -4)
+            rows.topAnchor.constraint(equalTo: document.topAnchor, constant: 2),
+            rows.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -2)
         ])
         renderEntries()
+    }
+
+    deinit {
+        if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
+        if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
     }
 
     func update(entries: [DashboardEntry]) {
         guard self.entries != entries else { return }
         self.entries = entries
-        // A sheet can stay open while events arrive. Preserve the edit and render afterward.
-        guard !isRenaming else { return }
+        guard !isRenaming, !trackingMenu else { return }
         renderEntries()
     }
 
+    func toggle(anchor: NSRect, screen: NSScreen) {
+        if panel.isVisible { hide() } else { show(anchor: anchor, screen: screen) }
+    }
+
+    func show(anchor: NSRect, screen: NSScreen) {
+        guard !isRenaming else { return }
+        // Include the compact robot next to the band so mouse-down cannot hide and
+        // then immediately reopen the panel when its mouse-up toggle arrives.
+        toggleRegion = anchor.insetBy(dx: -40, dy: -8)
+        let bounds = screen.visibleFrame.insetBy(dx: 12, dy: 12)
+        let width = min(520, bounds.width)
+        let top = min(anchor.minY - 8, bounds.maxY)
+        let height = min(560, max(260, top - bounds.minY))
+        let x = min(max(anchor.midX - width / 2, bounds.minX), bounds.maxX - width)
+        let y = min(max(top - height, bounds.minY), bounds.maxY - height)
+        panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
+        present()
+    }
+
+    /// Standalone fallback, also used by bitmap previews.
     func show() {
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        toggleRegion = nil
+        panel.center()
+        present()
+    }
+
+    func hide() {
+        guard !isRenaming else { return }
+        panel.orderOut(nil)
+        if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor); self.localMouseMonitor = nil }
+        if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor); self.globalMouseMonitor = nil }
     }
 
     func updateQuiet(status: String, active: Bool) {
         quietStatus.stringValue = status
         quietStatus.toolTip = status
-        quietButton.item(at: 0)?.title = active ? "Не отвлекать: вкл." : "Не отвлекать"
+        quietButton.item(at: 0)?.title = active ? "Тишина включена" : "Не отвлекать"
+        quietStatus.textColor = active ? DashboardPalette.amber : DashboardPalette.dim
         endQuietItem.isEnabled = active
     }
 
-    /// Render only this window's own content. Never reads pixels from the screen.
+    /// Render only this panel's own content, without reading screen pixels.
     func capturePreview(to url: URL) {
-        guard let view = window.contentView else { return }
+        guard let view = panel.contentView else { return }
         view.layoutSubtreeIfNeeded()
         let size = view.bounds.size
         guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil,
@@ -174,59 +278,123 @@ final class DashboardController: NSObject {
         try? png.write(to: url, options: .atomic)
     }
 
+    func layoutReport() -> [String: Any] {
+        ["x": Double(panel.frame.minX), "y": Double(panel.frame.minY),
+         "width": Double(panel.frame.width), "height": Double(panel.frame.height),
+         "visible": panel.isVisible]
+    }
+
+    func menuWillOpen(_ menu: NSMenu) { trackingMenu = true }
+    func menuDidClose(_ menu: NSMenu) { finishMenuTracking() }
+
+    private func finishMenuTracking() {
+        trackingMenu = false
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.trackingMenu, !self.isRenaming else { return }
+            self.renderEntries()
+        }
+    }
+
+    private func present() {
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        installDismissMonitors()
+    }
+
+    private func installDismissMonitors() {
+        guard localMouseMonitor == nil, globalMouseMonitor == nil else { return }
+        let kinds: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: kinds) { [weak self] event in
+            MainActor.assumeIsolated { self?.dismissIfOutside(eventWindow: event.window) }
+            return event
+        }
+        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: kinds) { [weak self] _ in
+            MainActor.assumeIsolated { self?.dismissIfOutside(eventWindow: nil) }
+        }
+    }
+
+    private func dismissIfOutside(eventWindow: NSWindow?) {
+        guard panel.isVisible, !isRenaming, !trackingMenu, NSApp.modalWindow == nil else { return }
+        // Status-bar controls dispatch their own explicit toggle on mouse-up.
+        if eventWindow?.level == .statusBar { return }
+        let pointer = NSEvent.mouseLocation
+        guard !panel.frame.contains(pointer), toggleRegion?.contains(pointer) != true else { return }
+        hide()
+    }
+
+    @objc private func closePanel() { hide() }
+    @objc private func changeFilter() {
+        filter = Filter(rawValue: filterControl.selectedSegment) ?? .all
+        renderEntries()
+    }
     @objc private func selectQuiet(_ sender: NSMenuItem) {
         handler(.quiet(sender.tag < 0 ? nil : TimeInterval(sender.tag)))
     }
-
     @objc private func endQuiet() { handler(.endQuiet) }
     @objc private func copyAttentionInstruction() { handler(.copyAttentionInstruction) }
 
     private func renderEntries() {
-        let unread = entries.reduce(0) { $0 + max(0, $1.unreadCount) }
-        let notificationText = entries.contains(where: \.isImportant)
-            ? "Автоуведомления только от выбранного чата; остальные результаты остаются в очереди."
-            : "Автоуведомления от всех чатов. Можно выбрать один важный."
-        summary.stringValue = entries.isEmpty
-            ? "Здесь появятся чаты после событий Codex. Названия можно задать вручную."
-            : "Чатов: \(entries.count) · непросмотренных результатов: \(unread). \(notificationText)"
-        if renderedEntries.map(\.id) == entries.map(\.id), rowViews.count == entries.count, !entries.isEmpty {
-            for (row, entry) in zip(rowViews, entries) { row.update(entry) }
+        chatCount.stringValue = "\(entries.count) \(Self.chatWord(entries.count))"
+        runningCount.stringValue = "В работе  \(entries.filter { $0.status == .running }.count)"
+        attentionCount.stringValue = "Ждут тебя  \(entries.filter { $0.status == .attention }.count)"
+        completedCount.stringValue = "Готовы  \(entries.reduce(0) { $0 + max(0, $1.unreadCount) })"
+        if let important = entries.first(where: \.isImportant) {
+            focusStatus.stringValue = "Уведомляет только «\(important.name)»"
+        } else { focusStatus.stringValue = "Все чаты могут уведомлять" }
+        focusStatus.toolTip = focusStatus.stringValue
+        let visible = entries.filter { entry in
+            switch filter {
+            case .all: return true
+            case .running: return entry.status == .running
+            case .attention: return entry.status == .attention
+            case .completed: return entry.unreadCount > 0
+            }
+        }
+        if !visible.isEmpty, renderedEntries.map(\.id) == visible.map(\.id), rowViews.count == visible.count {
+            for (row, entry) in zip(rowViews, visible) { row.update(entry) }
         } else {
             rows.arrangedSubviews.forEach {
                 rows.removeArrangedSubview($0)
                 $0.removeFromSuperview()
             }
             rowViews.removeAll()
-            if entries.isEmpty {
-                let empty = NSTextField(wrappingLabelWithString:
-                    "Запусти задачу в Codex с подключёнными hooks. Здесь будут состояние, время и непросмотренные результаты каждого чата — без содержимого переписки.")
-                empty.font = .systemFont(ofSize: 13)
-                empty.textColor = .secondaryLabelColor
+            if visible.isEmpty {
+                let text = entries.isEmpty
+                    ? "Пока нет чатов\nЗапусти задачу в Codex с подключёнными hooks. Состояния появятся здесь автоматически."
+                    : "Здесь пока пусто\nВ этом фильтре нет чатов. Остальные доступны во вкладке «Все»."
+                let empty = NSTextField(wrappingLabelWithString: text)
+                empty.font = .systemFont(ofSize: 12)
+                empty.textColor = DashboardPalette.secondary
+                empty.maximumNumberOfLines = 5
+                empty.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
                 rows.addArrangedSubview(empty)
                 empty.widthAnchor.constraint(equalTo: rows.widthAnchor).isActive = true
             } else {
-                for entry in entries {
-                    let row = DashboardRow(entry: entry) { [weak self] action in
+                for entry in visible {
+                    let row = DashboardRow(entry: entry, handler: { [weak self] action in
                         guard let self else { return }
                         switch action {
                         case .rename(let id, _): self.rename(id: id)
                         default: self.handler(action)
                         }
-                    }
+                    }, menuTracking: { [weak self] active in
+                        if active { self?.trackingMenu = true } else { self?.finishMenuTracking() }
+                    })
                     rows.addArrangedSubview(row)
                     row.widthAnchor.constraint(equalTo: rows.widthAnchor).isActive = true
                     rowViews.append(row)
                 }
             }
         }
-        renderedEntries = entries
+        renderedEntries = visible
     }
 
     private func rename(id: String) {
         guard !isRenaming, let entry = entries.first(where: { $0.id == id }) else { return }
         let alert = NSAlert()
+        alert.window.appearance = NSAppearance(named: .darkAqua)
         alert.messageText = "Название чата на этом Mac"
-        alert.informativeText = "Это локальная подпись. Название в Codex не изменится."
+        alert.informativeText = "Локальная подпись поможет узнать задачу. Название в Codex не изменится."
         alert.addButton(withTitle: "Сохранить")
         alert.addButton(withTitle: "Отмена")
         let input = NSTextField(string: entry.name)
@@ -235,7 +403,7 @@ final class DashboardController: NSObject {
         alert.accessoryView = input
         alert.window.initialFirstResponder = input
         isRenaming = true
-        alert.beginSheetModal(for: window) { [weak self] response in
+        alert.beginSheetModal(for: panel) { [weak self] response in
             guard let self else { return }
             self.isRenaming = false
             if response == .alertFirstButtonReturn {
@@ -245,13 +413,50 @@ final class DashboardController: NSObject {
             self.renderEntries()
         }
     }
+
+    private func configureMetadata(_ field: NSTextField) {
+        field.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+        field.textColor = DashboardPalette.dim
+        field.lineBreakMode = .byTruncatingTail
+    }
+    private func configureCounter(_ field: NSTextField, color: NSColor) {
+        field.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
+        field.textColor = color
+    }
+    private static func spacer() -> NSView {
+        let view = NSView()
+        view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        return view
+    }
+    private static func label(_ text: String, size: CGFloat, weight: NSFont.Weight = .regular,
+                              color: NSColor, monospaced: Bool = false) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = monospaced ? .monospacedSystemFont(ofSize: size, weight: weight) : .systemFont(ofSize: size, weight: weight)
+        field.textColor = color
+        return field
+    }
+    private static func chatWord(_ count: Int) -> String {
+        if count % 100 >= 11 && count % 100 <= 14 { return "чатов" }
+        switch count % 10 { case 1: return "чат"; case 2...4: return "чата"; default: return "чатов" }
+    }
 }
 
-private final class DashboardRootView: NSView {
-    override var isOpaque: Bool { true }
+@MainActor
+private final class DashboardPanel: NSPanel {
+    var onCancel: (() -> Void)?
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+    override func cancelOperation(_ sender: Any?) { onCancel?() }
+}
+
+private final class DashboardSurface: NSView {
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.windowBackgroundColor.setFill()
-        dirtyRect.fill()
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 16, yRadius: 16)
+        DashboardPalette.background.setFill()
+        path.fill()
+        DashboardPalette.border.setStroke()
+        path.lineWidth = 1
+        path.stroke()
     }
 }
 
@@ -260,56 +465,86 @@ private final class DashboardDocumentView: NSView {
 }
 
 @MainActor
-private final class DashboardRow: NSView {
+private final class DashboardRow: NSView, NSMenuDelegate {
     private let name = NSTextField(labelWithString: "")
     private let unread = NSTextField(labelWithString: "")
-    private let state = NSTextField(labelWithString: "")
+    private let star = NSTextField(labelWithString: "★")
+    private let identity = NSTextField(labelWithString: "")
+    private let state = DashboardStateChip()
     private let elapsed = NSTextField(labelWithString: "")
     private let updated = NSTextField(labelWithString: "")
-    private let importantLabel = NSTextField(labelWithString: "")
-    private let important = NSButton(checkboxWithTitle: "Уведомлять об этом", target: nil, action: nil)
-    private let reminder = NSPopUpButton(frame: .zero, pullsDown: true)
     private let reminderLabel = NSTextField(labelWithString: "")
     private let acknowledge = NSButton(title: "Просмотрено", target: nil, action: nil)
+    private let reminder = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let importantItem = NSMenuItem(title: "Уведомлять об этом чате", action: nil, keyEquivalent: "")
     private var entry: DashboardEntry
     private let handler: (DashboardAction) -> Void
+    private let menuTracking: (Bool) -> Void
 
-    init(entry: DashboardEntry, handler: @escaping (DashboardAction) -> Void) {
+    init(entry: DashboardEntry, handler: @escaping (DashboardAction) -> Void, menuTracking: @escaping (Bool) -> Void) {
         self.entry = entry
         self.handler = handler
+        self.menuTracking = menuTracking
         super.init(frame: .zero)
         wantsLayer = true
         layer?.cornerRadius = 10
-        layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        layer?.borderColor = NSColor.separatorColor.cgColor
+        layer?.backgroundColor = DashboardPalette.card.cgColor
+        layer?.borderColor = DashboardPalette.border.cgColor
         layer?.borderWidth = 0.5
-
-        name.font = .systemFont(ofSize: 14, weight: .semibold)
+        name.font = .systemFont(ofSize: 13, weight: .semibold)
+        name.textColor = DashboardPalette.text
         name.lineBreakMode = .byTruncatingTail
         name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        unread.font = .systemFont(ofSize: 11, weight: .semibold)
-        unread.textColor = .controlAccentColor
-        unread.setContentCompressionResistancePriority(.required, for: .horizontal)
-        state.font = .systemFont(ofSize: 12, weight: .medium)
-        elapsed.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-        elapsed.textColor = .secondaryLabelColor
-        updated.font = .systemFont(ofSize: 11)
-        updated.textColor = .secondaryLabelColor
-        updated.lineBreakMode = .byTruncatingTail
-        importantLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        importantLabel.textColor = .controlAccentColor
-        importantLabel.lineBreakMode = .byTruncatingTail
-        importantLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        important.font = .systemFont(ofSize: 11)
-        important.target = self
-        important.action = #selector(toggleImportant)
-        reminderLabel.font = .systemFont(ofSize: 11)
-        reminderLabel.textColor = .secondaryLabelColor
-        reminderLabel.lineBreakMode = .byTruncatingTail
+        unread.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
+        unread.textColor = DashboardPalette.green
+        star.font = .systemFont(ofSize: 12)
+        star.textColor = DashboardPalette.amber
+        star.toolTip = "Выбран для уведомлений"
+        [identity, elapsed, updated, reminderLabel].forEach {
+            $0.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+            $0.textColor = DashboardPalette.secondary
+            $0.lineBreakMode = .byTruncatingTail
+            $0.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
+        identity.textColor = DashboardPalette.dim
+        updated.textColor = DashboardPalette.dim
+        reminderLabel.textColor = DashboardPalette.amber
+        let more = NSPopUpButton(frame: .zero, pullsDown: true)
+        more.addItem(withTitle: "•••")
+        more.font = .monospacedSystemFont(ofSize: 11, weight: .semibold)
+        more.isBordered = false
+        (more.cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow
+        more.contentTintColor = DashboardPalette.secondary
+        more.toolTip = "Название и важный чат"
+        more.setAccessibilityLabel("Действия с чатом")
+        more.menu?.autoenablesItems = false
+        more.menu?.delegate = self
+        let rename = NSMenuItem(title: "Переименовать на этом Mac…", action: #selector(renameChat), keyEquivalent: "")
+        rename.target = self
+        more.menu?.addItem(rename)
+        more.menu?.addItem(.separator())
+        importantItem.target = self
+        importantItem.action = #selector(toggleImportant)
+        more.menu?.addItem(importantItem)
+        let open = NSButton(title: "Открыть", target: self, action: #selector(openChat))
+        acknowledge.target = self
+        acknowledge.action = #selector(acknowledgeChat)
+        [open, acknowledge].forEach {
+            $0.bezelStyle = .rounded
+            $0.controlSize = .small
+            $0.font = .systemFont(ofSize: 11, weight: .medium)
+        }
+        open.bezelColor = NSColor(hex: 0x335E9B)
+        open.contentTintColor = DashboardPalette.text
+        open.attributedTitle = NSAttributedString(string: "Открыть", attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+            .foregroundColor: DashboardPalette.blue
+        ])
         reminder.controlSize = .small
         reminder.font = .systemFont(ofSize: 11)
         reminder.addItem(withTitle: "Напомнить")
         reminder.menu?.autoenablesItems = false
+        reminder.menu?.delegate = self
         for minutes in [5, 10, 30] {
             let item = NSMenuItem(title: "Вернуться через \(minutes) мин", action: #selector(remindCompleted(_:)), keyEquivalent: "")
             item.tag = minutes * 60
@@ -324,32 +559,21 @@ private final class DashboardRow: NSView {
             reminder.menu?.addItem(item)
         }
         reminder.menu?.addItem(.separator())
-        let cancelReminder = NSMenuItem(title: "Отменить напоминания", action: #selector(cancelReminders), keyEquivalent: "")
-        cancelReminder.target = self
-        reminder.menu?.addItem(cancelReminder)
-
-        let open = NSButton(title: "Открыть чат", target: self, action: #selector(openChat))
-        let rename = NSButton(title: "Название…", target: self, action: #selector(renameChat))
-        acknowledge.target = self
-        acknowledge.action = #selector(acknowledgeChat)
-        [open, rename, acknowledge].forEach {
-            $0.bezelStyle = .rounded
-            $0.controlSize = .small
-            $0.font = .systemFont(ofSize: 11)
-        }
-        let heading = NSStackView(views: [name, unread])
-        heading.distribution = .fill
+        let cancel = NSMenuItem(title: "Отменить напоминания", action: #selector(cancelReminders), keyEquivalent: "")
+        cancel.target = self
+        reminder.menu?.addItem(cancel)
+        let heading = NSStackView(views: [name, star, unread, more])
         heading.spacing = 8
+        heading.distribution = .fill
+        more.widthAnchor.constraint(equalToConstant: 28).isActive = true
         let status = NSStackView(views: [state, elapsed])
         status.spacing = 10
-        let actions = NSStackView(views: [open, rename, acknowledge, reminder])
+        let actions = NSStackView(views: [open, acknowledge, reminder])
         actions.spacing = 8
-        let notification = NSStackView(views: [important, importantLabel])
-        notification.spacing = 10
-        let content = NSStackView(views: [heading, status, updated, notification, reminderLabel, actions])
+        let content = NSStackView(views: [heading, identity, status, updated, reminderLabel, actions])
         content.orientation = .vertical
         content.alignment = .leading
-        content.spacing = 6
+        content.spacing = 7
         content.translatesAutoresizingMaskIntoConstraints = false
         addSubview(content)
         NSLayoutConstraint.activate([
@@ -358,27 +582,30 @@ private final class DashboardRow: NSView {
             content.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             content.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             heading.widthAnchor.constraint(equalTo: content.widthAnchor),
+            identity.widthAnchor.constraint(equalTo: content.widthAnchor),
             updated.widthAnchor.constraint(equalTo: content.widthAnchor),
             reminderLabel.widthAnchor.constraint(equalTo: content.widthAnchor)
         ])
         update(entry)
     }
-
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func update(_ entry: DashboardEntry) {
         self.entry = entry
         name.stringValue = entry.name
         name.toolTip = entry.name
-        let resultText = entry.unreadCount > 0 ? "Новых: \(entry.unreadCount)" : ""
-        unread.stringValue = [entry.attentionText, resultText].filter { !$0.isEmpty }.joined(separator: " · ")
-        unread.toolTip = unread.stringValue
-        state.stringValue = entry.stateText
+        star.isHidden = !entry.isImportant
+        unread.stringValue = entry.unreadCount > 0 ? "новых: \(entry.unreadCount)" : ""
+        unread.isHidden = entry.unreadCount == 0
+        identity.stringValue = "ID " + String(entry.id.prefix(8))
+        identity.toolTip = entry.id
+        state.update(text: entry.stateText, status: entry.status)
         elapsed.stringValue = entry.elapsedText
         updated.stringValue = entry.updatedText
-        acknowledge.isEnabled = entry.unreadCount > 0 || !entry.attentionText.isEmpty
-        important.state = entry.isImportant ? .on : .off
-        importantLabel.stringValue = entry.isImportant ? "Выбран для уведомлений" : ""
+        let pending = entry.unreadCount > 0 || !entry.attentionText.isEmpty
+        acknowledge.isHidden = !pending
+        acknowledge.isEnabled = pending
+        importantItem.state = entry.isImportant ? .on : .off
         reminderLabel.stringValue = entry.reminderText
         reminderLabel.toolTip = entry.reminderText
         reminderLabel.isHidden = entry.reminderText.isEmpty
@@ -391,7 +618,8 @@ private final class DashboardRow: NSView {
             }
         }
     }
-
+    func menuWillOpen(_ menu: NSMenu) { menuTracking(true) }
+    func menuDidClose(_ menu: NSMenu) { menuTracking(false) }
     @objc private func openChat() { handler(.openChat(entry.id)) }
     @objc private func acknowledgeChat() { handler(.acknowledgeChat(entry.id)) }
     @objc private func renameChat() { handler(.rename(entry.id, entry.name)) }
@@ -399,4 +627,38 @@ private final class DashboardRow: NSView {
     @objc private func remindCompleted(_ sender: NSMenuItem) { handler(.remindCompleted(entry.id, TimeInterval(sender.tag))) }
     @objc private func watchDuration(_ sender: NSMenuItem) { handler(.watchDuration(entry.id, TimeInterval(sender.tag))) }
     @objc private func cancelReminders() { handler(.cancelReminders(entry.id)) }
+}
+
+private final class DashboardStateChip: NSView {
+    private let label = NSTextField(labelWithString: "")
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = 5
+        label.font = .systemFont(ofSize: 11, weight: .medium)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 7),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
+            label.topAnchor.constraint(equalTo: topAnchor, constant: 3),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3)
+        ])
+    }
+    convenience init() { self.init(frame: .zero) }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    func update(text: String, status: DashboardStatus) {
+        label.stringValue = text
+        let color = DashboardPalette.color(for: status)
+        label.textColor = color
+        layer?.backgroundColor = color.withAlphaComponent(0.11).cgColor
+    }
+}
+
+private extension NSColor {
+    convenience init(hex: UInt32) {
+        self.init(calibratedRed: CGFloat((hex >> 16) & 255) / 255,
+                  green: CGFloat((hex >> 8) & 255) / 255,
+                  blue: CGFloat(hex & 255) / 255, alpha: 1)
+    }
 }
