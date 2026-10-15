@@ -129,6 +129,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var absenceInterruptions: [LocalNotice] = []
     private var wakeObservers: [NSObjectProtocol] = []
     private var timer: Timer?
+    private var heartbeatInterval: TimeInterval = 0
+    private var spoolWatcher: EventWake?
+    private var displaySleeping = false
     private var demo = option("--demo").flatMap(CompanionState.init(rawValue:))
     private let spool = EventSpool(directory: EventSpool.defaultDirectory)
 
@@ -180,6 +183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let location = self.controller.dashboardLocation() {
                 self.dashboard.toggle(anchor: location.anchor, screen: location.screen)
             } else { self.dashboard.show() }
+            self.refresh()
         }
         if option("--preview") == nil {
             dashboardShortcut = GlobalShortcutController { [weak self] in
@@ -187,6 +191,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.controller.dismissStateCard()
                 let location = self.controller.dashboardLocation()
                 self.dashboard.showForKeyboard(anchor: location?.anchor, screen: location?.screen)
+                self.refresh()
             }
             updateShortcutStatus()
         }
@@ -198,6 +203,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.demoHandler = { [weak self] state in self?.demo = state; self?.refresh() }
         controller.liveHandler = { [weak self] in self?.demo = nil; self?.refresh() }
         if option("--preview") == nil {
+            spoolWatcher = EventWake(directory: spool.directory) { [weak self] in
+                MainActor.assumeIsolated { self?.refresh() }
+            }
+            spoolWatcher?.start()
+            for name in [NSWorkspace.screensDidSleepNotification, NSWorkspace.screensDidWakeNotification] {
+                wakeObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        self?.displaySleeping = name == NSWorkspace.screensDidSleepNotification
+                        self?.refresh()
+                    }
+                })
+            }
             wakeObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.powerEventsAfter = Date()
@@ -221,11 +238,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refresh() }
-        }
-        // Keep lifecycle processing and the bounded power lease alive while menus track.
-        if let timer { RunLoop.main.add(timer, forMode: .common) }
         if let path = option("--preview") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                 if arguments.contains("--preview-dashboard") {
@@ -253,6 +265,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         keepAwake.stop()
+        spoolWatcher?.stop()
+        timer?.invalidate()
         if let previewDirectory { try? FileManager.default.removeItem(at: previewDirectory) }
     }
 
@@ -361,6 +375,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             pendingCount: Set(library.data.completions.map(\.id) + Array(library.data.attention.keys) + library.data.reviewingIDs).count,
             chatNames: Dictionary(uniqueKeysWithValues: library.data.chats.keys.map { ($0, displayName(for: $0)) }))
         updateDashboard()
+        configureHeartbeat()
+    }
+
+    private func configureHeartbeat() {
+        // Events wake us immediately. Timers only age state, service reminders and
+        // renew the bounded idle-sleep lease; sleeping displays need no UI ticks.
+        let interval: TimeInterval = !displaySleeping && dashboard.isVisible ? 1
+            : (!displaySleeping && model.snapshot().activeCount > 0 ? 5 : 30)
+        if option("--preview") == nil { spoolWatcher?.start() }
+        guard heartbeatInterval != interval else { return }
+        heartbeatInterval = interval
+        timer?.invalidate()
+        let next = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh() }
+        }
+        next.tolerance = min(2, interval * 0.2)
+        timer = next
+        RunLoop.main.add(next, forMode: .common)
     }
 
     private func handle(_ action: DashboardAction) {
@@ -435,6 +467,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateDashboard() {
+        guard !displaySleeping else { return }
         let quietText = library.data.quietIndefinitely ? "Тишина до выключения" : library.data.quietUntil.map {
             "Тишина ещё " + Self.duration($0.timeIntervalSinceNow)
         } ?? "Уведомления включены"
@@ -512,7 +545,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshContexts() {
-        guard option("--preview") == nil, !contextReadInFlight, Date().timeIntervalSince(lastContextRead) >= 5 else { return }
+        guard option("--preview") == nil, dashboard.isVisible, !displaySleeping,
+              !contextReadInFlight, Date().timeIntervalSince(lastContextRead) >= 5 else { return }
         let directories = library.data.workingDirectories
         contextReadInFlight = true
         lastContextRead = Date()
@@ -529,10 +563,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshNames(sessionIDs: [String]) {
-        guard option("--preview") == nil, !nameReadInFlight else { return }
+        guard option("--preview") == nil, !displaySleeping, !nameReadInFlight else { return }
         let ids = Array(sessionIDs.prefix(512))
         let membership = ids.sorted()
-        guard membership != lastNameIDs || Date().timeIntervalSince(lastNameRead) >= 5 else { return }
+        let interval: TimeInterval = dashboard.isVisible ? 5 : 30
+        guard membership != lastNameIDs || Date().timeIntervalSince(lastNameRead) >= interval else { return }
         lastNameIDs = membership
         lastNameRead = Date()
         nameReadInFlight = true

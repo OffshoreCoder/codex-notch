@@ -56,6 +56,12 @@ xcrun swiftc "${compiler_args[@]}" -framework IOKit Sources/ResultSignal.swift S
 xcrun swiftc "${compiler_args[@]}" -framework IOKit Sources/ResultSignal.swift Sources/TurnGroup.swift Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Sources/KeepAwake.swift Tests/KeepAwakeQuestionTests.swift -o .build/keep-awake-question-tests
 ./.build/keep-awake-question-tests
 
+xcrun swiftc "${compiler_args[@]}" Sources/EnergyPolicy.swift Tests/EnergyPolicyTests.swift -o .build/energy-policy-tests
+./.build/energy-policy-tests
+
+xcrun swiftc "${compiler_args[@]}" Sources/ResultSignal.swift Sources/TurnGroup.swift Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Sources/EventWake.swift Tests/EventWakeTests.swift -o .build/event-wake-tests
+./.build/event-wake-tests
+
 if [[ "${CODEX_NOTCH_TEST_NATIVE_POWER:-0}" == "1" ]]; then
   xcrun swiftc "${compiler_args[@]}" -framework IOKit Sources/ResultSignal.swift Sources/TurnGroup.swift Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Sources/KeepAwake.swift Tests/KeepAwakeNativeTests.swift -o .build/keep-awake-native-tests
   ./.build/keep-awake-native-tests --run-native-smoke
