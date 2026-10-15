@@ -402,7 +402,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.setScreenSharing(library.data.screenSharing, presentation: privacy)
         let skin = CharacterSkin(savedValue: option("--skin") ?? library.data.characterSkin)
         controller.setSkin(skin)
-        controller.setHeadphoneAccessory(enabled: library.data.headphoneAccessoryEnabled)
         updateSettings()
         controller.update(snapshot)
         controller.updateQueue(library.data.completions, error: library.error,
@@ -543,8 +542,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .toggleSharing: handle(.toggleSharing)
         case .toggleKeepAwake: handle(.toggleKeepAwake)
         case .configureShortcut(let shortcut): handle(.configureShortcut(shortcut))
-        case .toggleHeadphoneAccessory:
-            library.update { $0.headphoneAccessoryEnabled.toggle() }
         case .toggleStatistics:
             library.update { $0.statisticsEnabled.toggle() }
             statistics.setEnabled(library.data.statisticsEnabled)
@@ -564,7 +561,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let powerText = keepAwake.status == .waiting && blocked ? "Ожидается твой ответ · сон разрешён" : keepAwake.statusText
         settings.update(SettingsPreferences(skin: CharacterSkin(savedValue: option("--skin") ?? library.data.characterSkin),
             screenSharing: library.data.screenSharing, keepAwakeEnabled: library.data.keepAwakeEnabled,
-            headphoneAccessoryEnabled: library.data.headphoneAccessoryEnabled, statisticsEnabled: library.data.statisticsEnabled,
+            statisticsEnabled: library.data.statisticsEnabled,
             shortcut: dashboardShortcut?.shortcut ?? .standard, shortcutEnabled: dashboardShortcut?.isEnabled ?? true,
             shortcutError: dashboardShortcut?.error, energyStatus: "Адаптивная анимация · локальные события",
             powerStatus: powerText, powerActive: keepAwake.status == .active,

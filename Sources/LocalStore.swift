@@ -34,7 +34,6 @@ struct LocalData: Codable {
     var chats: [String: ChatSummary] = [:]
     var labels: [String: String] = [:]
     var keepAwakeEnabled = false
-    var headphoneAccessoryEnabled = false
     var statisticsEnabled = true
     var characterSkin = "robot"
     var screenSharing = false
@@ -57,7 +56,7 @@ struct LocalData: Codable {
     var deferredAttentionIDs: [String] = []
 
     init() {}
-    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, workingDirectories, results, reviewingIDs, reviewedResults, turnGroup, archivedChats, screenSharing, characterSkin, keepAwakeEnabled, headphoneAccessoryEnabled, statisticsEnabled, lastRealEvent, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders, attention, seenAttention, deferredAttentionIDs }
+    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels, workingDirectories, results, reviewingIDs, reviewedResults, turnGroup, archivedChats, screenSharing, characterSkin, keepAwakeEnabled, statisticsEnabled, lastRealEvent, importantSessionID, quietUntil, quietStartedAt, quietIndefinitely, deferredCompletionIDs, reminders, deferredReminders, attention, seenAttention, deferredAttentionIDs }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         completions = try c.decodeIfPresent([CompletedTurn].self, forKey: .completions) ?? []
@@ -65,7 +64,6 @@ struct LocalData: Codable {
         chats = try c.decodeIfPresent([String: ChatSummary].self, forKey: .chats) ?? [:]
         labels = try c.decodeIfPresent([String: String].self, forKey: .labels) ?? [:]
         keepAwakeEnabled = try c.decodeIfPresent(Bool.self, forKey: .keepAwakeEnabled) ?? false
-        headphoneAccessoryEnabled = try c.decodeIfPresent(Bool.self, forKey: .headphoneAccessoryEnabled) ?? false
         statisticsEnabled = try c.decodeIfPresent(Bool.self, forKey: .statisticsEnabled) ?? true
         characterSkin = try c.decodeIfPresent(String.self, forKey: .characterSkin) ?? "robot"
         screenSharing = try c.decodeIfPresent(Bool.self, forKey: .screenSharing) ?? false

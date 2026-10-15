@@ -5,7 +5,6 @@ struct SettingsPreferences: Equatable {
     var skin: CharacterSkin = .robot
     var screenSharing = false
     var keepAwakeEnabled = false
-    var headphoneAccessoryEnabled = false
     var statisticsEnabled = true
     var shortcut: GlobalShortcut = .standard
     var shortcutEnabled = true
@@ -22,7 +21,6 @@ enum SettingsAction {
     case selectSkin(CharacterSkin)
     case toggleSharing
     case toggleKeepAwake
-    case toggleHeadphoneAccessory
     case toggleStatistics
     case configureShortcut(GlobalShortcut?)
     case openStatistics
@@ -52,7 +50,6 @@ final class SettingsController: NSObject, NSMenuDelegate {
     private var displayedPreferences: SettingsPreferences?
     private let skinButton = NSPopUpButton(frame: .zero, pullsDown: false)
     private let characterPreview = SettingsCharacterPreview()
-    private let headphones = NSButton(checkboxWithTitle: "Наушники на персонаже", target: nil, action: nil)
     private let sharing = NSButton(checkboxWithTitle: "Скрывать названия при демонстрации", target: nil, action: nil)
     private let keepAwake = NSButton(checkboxWithTitle: "Не усыплять Mac, пока Codex работает", target: nil, action: nil)
     private let statistics = NSButton(checkboxWithTitle: "Собирать время и токены локально", target: nil, action: nil)
@@ -129,9 +126,7 @@ final class SettingsController: NSObject, NSMenuDelegate {
         let skinText = Self.stack([skinButton, skinDescription], spacing: 5)
         let skinRow = NSStackView(views: [characterPreview, skinText, Self.spacer()])
         skinRow.spacing = 12
-        Self.configure(headphones, target: self, action: #selector(toggleHeadphones))
-        let headphoneHint = Self.hint("Когда наушники выбраны основным аудиовыходом.")
-        sections.addArrangedSubview(Self.card(title: "ПЕРСОНАЖ", views: [skinRow, headphones, headphoneHint]))
+        sections.addArrangedSubview(Self.card(title: "ПЕРСОНАЖ", views: [skinRow]))
 
         Self.configure(sharing, target: self, action: #selector(toggleSharing))
         Self.configure(keepAwake, target: self, action: #selector(toggleKeepAwake))
@@ -260,7 +255,6 @@ final class SettingsController: NSObject, NSMenuDelegate {
             skinButton.selectItem(at: index)
         }
         characterPreview.skin = value.skin
-        headphones.state = value.headphoneAccessoryEnabled ? .on : .off
         sharing.state = value.screenSharing ? .on : .off
         keepAwake.state = value.keepAwakeEnabled ? .on : .off
         statistics.state = value.statisticsEnabled ? .on : .off
@@ -377,7 +371,6 @@ final class SettingsController: NSObject, NSMenuDelegate {
         if !recorderControls.isHidden { cancelCustomShortcut() } else { hide() }
     }
     @objc private func closePanel() { hide() }
-    @objc private func toggleHeadphones() { handler(.toggleHeadphoneAccessory) }
     @objc private func toggleSharing() { handler(.toggleSharing) }
     @objc private func toggleKeepAwake() { handler(.toggleKeepAwake) }
     @objc private func toggleStatistics() { handler(.toggleStatistics) }

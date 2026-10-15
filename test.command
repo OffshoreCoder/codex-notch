@@ -59,9 +59,6 @@ xcrun swiftc "${compiler_args[@]}" -framework IOKit Sources/ResultSignal.swift S
 xcrun swiftc "${compiler_args[@]}" Sources/EnergyPolicy.swift Tests/EnergyPolicyTests.swift -o .build/energy-policy-tests
 ./.build/energy-policy-tests
 
-xcrun swiftc "${compiler_args[@]}" -framework CoreAudio Sources/AudioAccessory.swift Tests/AudioAccessoryTests.swift -o .build/audio-accessory-tests
-./.build/audio-accessory-tests
-
 xcrun swiftc "${compiler_args[@]}" Sources/ResultSignal.swift Sources/TurnGroup.swift Sources/CompanionState.swift Sources/EventSpool.swift Sources/LocalStore.swift Sources/EventWake.swift Tests/EventWakeTests.swift -o .build/event-wake-tests
 ./.build/event-wake-tests
 

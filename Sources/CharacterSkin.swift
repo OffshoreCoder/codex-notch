@@ -45,7 +45,7 @@ enum CharacterRenderer {
 
     static func draw(skin: CharacterSkin, state: CompanionState, animationTime: TimeInterval,
                      reducedMotion: Bool, origin: NSPoint = .zero, accent: NSColor,
-                     showAura: Bool = true, headphones: Bool = false, reactionProgress: CGFloat? = nil) {
+                     showAura: Bool = true, reactionProgress: CGFloat? = nil) {
         NSGraphicsContext.saveGraphicsState()
         defer { NSGraphicsContext.restoreGraphicsState() }
         let t = reducedMotion || !animationTime.isFinite ? 0 : animationTime
@@ -69,7 +69,6 @@ enum CharacterRenderer {
         case .ghost: drawGhost(state: state, time: t, reducedMotion: reducedMotion, accent: accent, motion: motion)
         case .astronaut: drawAstronaut(state: state, time: t, reducedMotion: reducedMotion, accent: accent, motion: motion)
         }
-        if headphones { drawHeadphones(skin: skin) }
         if state == .coding { keyboard(time: t, color: skin == .robot ? mint : accent) }
         stateMark(state, accent: accent)
     }
@@ -89,22 +88,6 @@ enum CharacterRenderer {
             reaction = p.map { sin($0 * .pi) } ?? 0
             hop = reaction * 2.2
             tilt = p.map { sin($0 * .pi * 4) * sin($0 * .pi) * 2.4 } ?? 0
-        }
-    }
-
-    private static func drawHeadphones(skin: CharacterSkin) {
-        let top: CGFloat = skin == .cat ? 9 : 3
-        let band = NSBezierPath()
-        band.move(to: NSPoint(x: -1, y: 29))
-        band.line(to: NSPoint(x: -1, y: 20))
-        band.curve(to: NSPoint(x: 57, y: 20),
-                   controlPoint1: NSPoint(x: -1, y: top - 10), controlPoint2: NSPoint(x: 57, y: top - 10))
-        band.line(to: NSPoint(x: 57, y: 29))
-        band.lineWidth = 4; band.lineCapStyle = .round
-        color(0.20, 0.30, 0.39).setStroke(); band.stroke()
-        for x: CGFloat in [-4, 52] {
-            round(NSRect(x: x, y: 21, width: 8, height: 17), radius: 3, color: color(0.19, 0.29, 0.39))
-            round(NSRect(x: x + 2, y: 24, width: 3, height: 10), radius: 1.5, color: color(0.48, 0.75, 0.93))
         }
     }
 
