@@ -21,6 +21,14 @@ struct CompanionSnapshot: Codable {
     let updatedAt: Date
 }
 
+struct ChatSummary: Codable, Equatable {
+    let id: String
+    let turnID: String?
+    let state: CompanionState
+    let startedAt: Date?
+    let updatedAt: Date
+}
+
 /// This is the complete on-disk event schema. No prompt, command, code or transcript.
 struct CompanionEvent: Codable {
     let event: String
@@ -148,6 +156,14 @@ struct CompanionModel {
         return CompanionSnapshot(state: selected?.value.state ?? (sessions.isEmpty ? .idle : .unknown),
                                  sessionID: selected?.key, activeCount: active.count,
                                  updatedAt: selected?.value.lastEvent ?? now)
+    }
+
+    func chatSummaries(now: Date = Date()) -> [ChatSummary] {
+        sessions.map { id, session in
+            ChatSummary(id: id, turnID: session.turnKey,
+                        state: now.timeIntervalSince(session.lastEvent) < Self.staleAfter ? session.state : .unknown,
+                        startedAt: session.startedAt, updatedAt: session.lastEvent)
+        }.sorted { $0.updatedAt > $1.updatedAt }
     }
 
     func completion(for event: CompanionEvent) -> CompletedTurn? {

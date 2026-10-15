@@ -5,6 +5,7 @@ import CoreGraphics
 @MainActor
 final class NotchController: NSObject, NSMenuDelegate {
     var demoHandler: ((CompanionState) -> Void)?
+    var dashboardHandler: (() -> Void)?
     var liveHandler: (() -> Void)?
     var acknowledgeHandler: ((String?) -> Void)?
     private var completions: [CompletedTurn] = []
@@ -52,7 +53,7 @@ final class NotchController: NSObject, NSMenuDelegate {
         companionView.snapshot = snapshot
         companionView.onClick = { [weak self] in
             guard let self else { return }
-            if self.isExpanded { self.openCodex() } else { self.show() }
+            self.dashboardHandler?()
         }
         companionView.contextMenu = menu
         companionView.reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -309,6 +310,7 @@ final class NotchController: NSObject, NSMenuDelegate {
             queue.submenu = results
             menu.addItem(queue)
         }
+        menu.addItem(item("Чаты и результаты…", action: #selector(openDashboard)))
         menu.addItem(item("Показать состояние", action: #selector(revealState)))
         menu.addItem(item(isVisible ? "Скрыть персонажа" : "Показать персонажа", action: #selector(toggleVisibility)))
         menu.addItem(item("Открыть Codex", action: #selector(openCodex)))
@@ -376,6 +378,8 @@ final class NotchController: NSObject, NSMenuDelegate {
     }
 
     @objc private func returnToLive() { liveHandler?() }
+
+    @objc private func openDashboard() { dashboardHandler?() }
 
     @objc private func acknowledgeResults() { acknowledgeHandler?(nil) }
 
@@ -694,7 +698,7 @@ private final class CompanionView: NSView {
     }
 }
 
-private extension CompanionState {
+extension CompanionState {
     var companionTitle: String {
         switch self {
         case .idle: return "Готов к работе"

@@ -11,6 +11,18 @@ struct CompletedTurn: Codable, Equatable, Identifiable {
 struct LocalData: Codable {
     var completions: [CompletedTurn] = []
     var seenCompletions: [String] = []
+    var chats: [String: ChatSummary] = [:]
+    var labels: [String: String] = [:]
+
+    init() {}
+    enum CodingKeys: String, CodingKey { case completions, seenCompletions, chats, labels }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        completions = try c.decodeIfPresent([CompletedTurn].self, forKey: .completions) ?? []
+        seenCompletions = try c.decodeIfPresent([String].self, forKey: .seenCompletions) ?? []
+        chats = try c.decodeIfPresent([String: ChatSummary].self, forKey: .chats) ?? [:]
+        labels = try c.decodeIfPresent([String: String].self, forKey: .labels) ?? [:]
+    }
 }
 
 /// Deliberately stores metadata only. A corrupt file is left untouched for recovery.
@@ -50,6 +62,24 @@ final class LocalStore {
         return true
     }
 
+    func remember(_ chats: [ChatSummary]) {
+        update { data in
+            for chat in chats { data.chats[chat.id] = chat }
+            if data.chats.count > 256 {
+                let keep = data.chats.values.sorted { $0.updatedAt > $1.updatedAt }.prefix(256)
+                data.chats = Dictionary(uniqueKeysWithValues: keep.map { ($0.id, $0) })
+                data.labels = data.labels.filter { data.chats[$0.key] != nil }
+            }
+        }
+    }
+
+    func rename(_ sessionID: String, to name: String) {
+        let label = String(name.filter { !$0.isNewline && !$0.isASCIIControl }.prefix(80)).trimmingCharacters(in: .whitespaces)
+        update { $0.labels[sessionID] = label.isEmpty ? nil : label }
+    }
+    func name(for sessionID: String) -> String { data.labels[sessionID] ?? "Чат " + String(sessionID.prefix(8)) }
+    func acknowledgeChat(_ sessionID: String) { update { $0.completions.removeAll { $0.sessionID == sessionID } } }
+
     func acknowledge(_ id: String) { update { $0.completions.removeAll { $0.id == id } } }
     func acknowledgeAll() { update { $0.completions.removeAll() } }
 
@@ -66,4 +96,8 @@ final class LocalStore {
             error = nil
         } catch { self.error = "Не удалось сохранить очередь: \(error.localizedDescription)" }
     }
+}
+
+private extension Character {
+    var isASCIIControl: Bool { unicodeScalars.contains { $0.value < 32 || $0.value == 127 } }
 }

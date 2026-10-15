@@ -72,6 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: NotchController!
     private var model = CompanionModel()
     private var library: LocalStore!
+    private var dashboard: DashboardController!
     private var timer: Timer?
     private var demo = option("--demo").flatMap(CompanionState.init(rawValue:))
     private let spool = EventSpool(directory: EventSpool.defaultDirectory)
@@ -85,6 +86,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         library = LocalStore(directory: option("--preview") == nil ? spool.directory :
             FileManager.default.temporaryDirectory.appendingPathComponent("CodexNotch-preview-" + UUID().uuidString))
         controller = NotchController()
+        dashboard = DashboardController(handler: { [weak self] action in self?.handle(action) })
+        controller.dashboardHandler = { [weak self] in self?.dashboard.show() }
         controller.acknowledgeHandler = { [weak self] id in
             guard let self else { return }
             if let id { self.library.acknowledge(id) } else { self.library.acknowledgeAll() }
@@ -115,12 +118,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refresh() {
         if option("--preview") == nil {
-            for event in spool.drain() {
+            let events = spool.drain()
+            for event in events {
                 model.receive(event)
                 if let result = model.completion(for: event), library.record(result) {
                     controller.notify(title: "Ход завершён", sessionID: result.sessionID)
                 }
             }
+            if !events.isEmpty { library.remember(model.chatSummaries()) }
         }
         let live = model.snapshot()
         let snapshot = demo.map {
@@ -128,6 +133,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } ?? live
         controller.update(snapshot)
         controller.updateQueue(library.data.completions, error: library.error)
+        updateDashboard()
+    }
+
+    private func handle(_ action: DashboardAction) {
+        switch action {
+        case .openChat(let id):
+            if controller.openChat(id) { library.acknowledgeChat(id) }
+        case .acknowledgeChat(let id): library.acknowledgeChat(id)
+        case .rename(let id, let name): library.rename(id, to: name)
+        }
+        refresh()
+    }
+
+    private func updateDashboard() {
+        let live = Dictionary(uniqueKeysWithValues: model.chatSummaries().map { ($0.id, $0) })
+        var all = library.data.chats
+        for result in library.data.completions where all[result.sessionID] == nil {
+            all[result.sessionID] = ChatSummary(id: result.sessionID, turnID: result.turnID,
+                state: .finished, startedAt: result.startedAt, updatedAt: result.finishedAt)
+        }
+        let entries = all.values.sorted { left, right in
+            let l = library.data.completions.contains { $0.sessionID == left.id }
+            let r = library.data.completions.contains { $0.sessionID == right.id }
+            return l != r ? l : left.updatedAt > right.updatedAt
+        }.map { saved -> DashboardEntry in
+            let chat = live[saved.id] ?? saved
+            let state = live[saved.id] == nil && [.working, .coding, .checking].contains(saved.state)
+                ? CompanionState.unknown : chat.state
+            let duration = chat.startedAt.map {
+                (state == .finished || state == .interrupted ? chat.updatedAt : Date()).timeIntervalSince($0)
+            }
+            let elapsed = duration.map { "Ход: " + Self.duration($0) } ?? ""
+            return DashboardEntry(id: chat.id, name: library.name(for: chat.id),
+                stateText: state == .finished ? "Ход завершён" : state.companionTitle,
+                elapsedText: state == .unknown ? "Последнее известное состояние" : elapsed,
+                updatedText: "Последний сигнал: " + Self.duration(Date().timeIntervalSince(chat.updatedAt)) + " назад",
+                unreadCount: library.data.completions.filter { $0.sessionID == chat.id }.count)
+        }
+        dashboard.update(entries: entries)
+    }
+
+    private static func duration(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds))
+        return total < 60 ? "\(total) с" : total < 3600 ? "\(total / 60) мин" : "\(total / 3600) ч \(total % 3600 / 60) мин"
     }
 
     private var lockDescriptor: Int32 = -1

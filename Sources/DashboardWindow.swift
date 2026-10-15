@@ -1,0 +1,249 @@
+import AppKit
+
+/// Display metadata only: names are entered locally by the user, never read from chats.
+struct DashboardEntry: Equatable {
+    let id: String
+    let name: String
+    let stateText: String
+    let elapsedText: String
+    let updatedText: String
+    let unreadCount: Int
+}
+
+enum DashboardAction {
+    case openChat(String)
+    case acknowledgeChat(String)
+    case rename(String, String)
+}
+
+/// Explicitly opened, keyboard-accessible window. The notch itself remains passive.
+@MainActor
+final class DashboardController: NSObject {
+    private let window: NSWindow
+    private let rows = NSStackView()
+    private let summary = NSTextField(labelWithString: "")
+    private let handler: (DashboardAction) -> Void
+    private var entries: [DashboardEntry] = []
+    private var renderedEntries: [DashboardEntry] = []
+    private var rowViews: [DashboardRow] = []
+    private var isRenaming = false
+
+    init(handler: @escaping (DashboardAction) -> Void) {
+        self.handler = handler
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 440),
+                          styleMask: [.titled, .closable, .resizable],
+                          backing: .buffered, defer: false)
+        super.init()
+        window.title = "Чаты Codex"
+        window.minSize = NSSize(width: 520, height: 360)
+        window.isReleasedWhenClosed = false
+        window.center()
+
+        let root = NSView()
+        window.contentView = root
+        let title = NSTextField(labelWithString: "Чаты Codex")
+        title.font = .systemFont(ofSize: 20, weight: .semibold)
+        summary.font = .systemFont(ofSize: 12)
+        summary.textColor = .secondaryLabelColor
+        summary.lineBreakMode = .byWordWrapping
+        summary.maximumNumberOfLines = 2
+
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        let document = DashboardDocumentView()
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.spacing = 10
+        document.addSubview(rows)
+        scroll.documentView = document
+        [title, summary, scroll].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+            root.addSubview($0)
+        }
+        document.translatesAutoresizingMaskIntoConstraints = false
+        rows.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            title.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
+            title.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
+            summary.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 6),
+            summary.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            summary.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
+            scroll.topAnchor.constraint(equalTo: summary.bottomAnchor, constant: 16),
+            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+            scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
+            document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            rows.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 4),
+            rows.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -4),
+            rows.topAnchor.constraint(equalTo: document.topAnchor, constant: 4),
+            rows.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -4)
+        ])
+        renderEntries()
+    }
+
+    func update(entries: [DashboardEntry]) {
+        guard self.entries != entries else { return }
+        self.entries = entries
+        // A sheet can stay open while events arrive. Preserve the edit and render afterward.
+        guard !isRenaming else { return }
+        renderEntries()
+    }
+
+    func show() {
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func renderEntries() {
+        let unread = entries.reduce(0) { $0 + max(0, $1.unreadCount) }
+        summary.stringValue = entries.isEmpty
+            ? "Здесь появятся чаты после событий Codex. Названия можно задать вручную."
+            : "Чатов: \(entries.count) · непросмотренных результатов: \(unread). Названия хранятся только на этом Mac."
+        if renderedEntries.map(\.id) == entries.map(\.id), rowViews.count == entries.count, !entries.isEmpty {
+            for (row, entry) in zip(rowViews, entries) { row.update(entry) }
+        } else {
+            rows.arrangedSubviews.forEach {
+                rows.removeArrangedSubview($0)
+                $0.removeFromSuperview()
+            }
+            rowViews.removeAll()
+            if entries.isEmpty {
+                let empty = NSTextField(wrappingLabelWithString:
+                    "Запусти задачу в Codex с подключёнными hooks. Здесь будут состояние, время и непросмотренные результаты каждого чата — без содержимого переписки.")
+                empty.font = .systemFont(ofSize: 13)
+                empty.textColor = .secondaryLabelColor
+                rows.addArrangedSubview(empty)
+                empty.widthAnchor.constraint(equalTo: rows.widthAnchor).isActive = true
+            } else {
+                for entry in entries {
+                    let row = DashboardRow(entry: entry) { [weak self] action in
+                        guard let self else { return }
+                        switch action {
+                        case .rename(let id, _): self.rename(id: id)
+                        default: self.handler(action)
+                        }
+                    }
+                    rows.addArrangedSubview(row)
+                    row.widthAnchor.constraint(equalTo: rows.widthAnchor).isActive = true
+                    rowViews.append(row)
+                }
+            }
+        }
+        renderedEntries = entries
+    }
+
+    private func rename(id: String) {
+        guard !isRenaming, let entry = entries.first(where: { $0.id == id }) else { return }
+        let alert = NSAlert()
+        alert.messageText = "Название чата на этом Mac"
+        alert.informativeText = "Это локальная подпись. Название в Codex не изменится."
+        alert.addButton(withTitle: "Сохранить")
+        alert.addButton(withTitle: "Отмена")
+        let input = NSTextField(string: entry.name)
+        input.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+        input.placeholderString = "Например, исправление сборки"
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+        isRenaming = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self else { return }
+            self.isRenaming = false
+            if response == .alertFirstButtonReturn {
+                let name = String(input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
+                self.handler(.rename(id, name))
+            }
+            self.renderEntries()
+        }
+    }
+}
+
+private final class DashboardDocumentView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+@MainActor
+private final class DashboardRow: NSView {
+    private let name = NSTextField(labelWithString: "")
+    private let unread = NSTextField(labelWithString: "")
+    private let state = NSTextField(labelWithString: "")
+    private let elapsed = NSTextField(labelWithString: "")
+    private let updated = NSTextField(labelWithString: "")
+    private let acknowledge = NSButton(title: "Просмотрено", target: nil, action: nil)
+    private var entry: DashboardEntry
+    private let handler: (DashboardAction) -> Void
+
+    init(entry: DashboardEntry, handler: @escaping (DashboardAction) -> Void) {
+        self.entry = entry
+        self.handler = handler
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 10
+        layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        layer?.borderColor = NSColor.separatorColor.cgColor
+        layer?.borderWidth = 0.5
+
+        name.font = .systemFont(ofSize: 14, weight: .semibold)
+        name.lineBreakMode = .byTruncatingTail
+        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        unread.font = .systemFont(ofSize: 11, weight: .semibold)
+        unread.textColor = .controlAccentColor
+        unread.setContentCompressionResistancePriority(.required, for: .horizontal)
+        state.font = .systemFont(ofSize: 12, weight: .medium)
+        elapsed.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        elapsed.textColor = .secondaryLabelColor
+        updated.font = .systemFont(ofSize: 11)
+        updated.textColor = .secondaryLabelColor
+        updated.lineBreakMode = .byTruncatingTail
+
+        let open = NSButton(title: "Открыть чат", target: self, action: #selector(openChat))
+        let rename = NSButton(title: "Название…", target: self, action: #selector(renameChat))
+        acknowledge.target = self
+        acknowledge.action = #selector(acknowledgeChat)
+        [open, rename, acknowledge].forEach {
+            $0.bezelStyle = .rounded
+            $0.controlSize = .small
+            $0.font = .systemFont(ofSize: 11)
+        }
+        let heading = NSStackView(views: [name, unread])
+        heading.distribution = .fill
+        heading.spacing = 8
+        let status = NSStackView(views: [state, elapsed])
+        status.spacing = 10
+        let actions = NSStackView(views: [open, rename, acknowledge])
+        actions.spacing = 8
+        let content = NSStackView(views: [heading, status, updated, actions])
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 6
+        content.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            content.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            content.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            content.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            heading.widthAnchor.constraint(equalTo: content.widthAnchor),
+            updated.widthAnchor.constraint(equalTo: content.widthAnchor)
+        ])
+        update(entry)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func update(_ entry: DashboardEntry) {
+        self.entry = entry
+        name.stringValue = entry.name
+        name.toolTip = entry.name
+        unread.stringValue = entry.unreadCount > 0 ? "Новых: \(entry.unreadCount)" : ""
+        state.stringValue = entry.stateText
+        elapsed.stringValue = entry.elapsedText
+        updated.stringValue = entry.updatedText
+        acknowledge.isEnabled = entry.unreadCount > 0
+    }
+
+    @objc private func openChat() { handler(.openChat(entry.id)) }
+    @objc private func acknowledgeChat() { handler(.acknowledgeChat(entry.id)) }
+    @objc private func renameChat() { handler(.rename(entry.id, entry.name)) }
+}
